@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Todo</title>
+    <style>
+      body {
+        margin: 0;
+        font:
+          14px/1.5 system-ui,
+          sans-serif;
+        color: #1f2937;
+        padding: 16px;
+      }
+      h1 {
+        font-size: 16px;
+      }
+      input,
+      button {
+        font: inherit;
+        padding: 4px 8px;
+      }
+      li.done span {
+        text-decoration: line-through;
+        color: #9ca3af;
+      }
+      li button {
+        margin-left: 8px;
+        font-size: 11px;
+      }
+    </style>
+    <script>
+      window.__ICDP_ALLOWED_PARENTS = ["{{SHELL_ORIGIN}}"];
+    </script>
+    <script type="module" src="/frame-agent.js"></script>
+  </head>
+  <body>
+    <h1>Todo (second target)</h1>
+    <form id="todo-form">
+      <input id="todo-input" placeholder="What needs doing?" aria-label="New todo" />
+      <button id="add-todo" type="submit">Add</button>
+      <button id="clear-done" type="button">Clear done</button>
+    </form>
+    <ul id="todo-list" aria-label="Todo list"></ul>
+    <p>Open: <output id="open-count">0</output></p>
+    <script>
+      const list = document.getElementById("todo-list");
+      const input = document.getElementById("todo-input");
+      const todos = [];
+
+      function render() {
+        list.innerHTML = "";
+        for (const todo of todos) {
+          const item = document.createElement("li");
+          if (todo.done) item.className = "done";
+          const text = document.createElement("span");
+          text.textContent = todo.text;
+          const toggle = document.createElement("button");
+          toggle.type = "button";
+          toggle.textContent = todo.done ? "Undo" : "Done";
+          toggle.addEventListener("click", () => {
+            todo.done = !todo.done;
+            render();
+          });
+          item.append(text, toggle);
+          list.appendChild(item);
+        }
+        document.getElementById("open-count").textContent = String(
+          todos.filter((t) => !t.done).length,
+        );
+      }
+
+      document.getElementById("todo-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (!input.value.trim()) return;
+        todos.push({ text: input.value.trim(), done: false });
+        console.log("todo added:", input.value.trim());
+        input.value = "";
+        render();
+      });
+      document.getElementById("clear-done").addEventListener("click", () => {
+        for (let i = todos.length - 1; i >= 0; i--) if (todos[i].done) todos.splice(i, 1);
+        render();
+      });
+      render();
+    </script>
+  </body>
+</html>

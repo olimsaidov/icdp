@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Page Two</title>
+    <style>
+      body {
+        margin: 0;
+        font:
+          14px/1.5 system-ui,
+          sans-serif;
+        color: #1f2937;
+        padding: 20px;
+      }
+    </style>
+    <script>
+      window.__ICDP_ALLOWED_PARENTS = ["{{SHELL_ORIGIN}}"];
+    </script>
+    <script type="module" src="/frame-agent.js"></script>
+  </head>
+  <body>
+    <h1>Page Two</h1>
+    <p id="page-two-text">
+      You navigated to a second document. Target identity survived the navigation.
+    </p>
+    <a id="back-home" href="/">Back to the playground</a>
+    <button id="page-two-btn" type="button">Page two button</button>
+    <script>
+      document.getElementById("page-two-btn").addEventListener("click", () => {
+        console.log("clicked on page two");
+        document.getElementById("page-two-btn").textContent = "Clicked on page two";
+      });
+    </script>
+  </body>
+</html>

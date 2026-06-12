@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>icdp playground shell</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font:
+          14px/1.45 system-ui,
+          sans-serif;
+        background: #f3f4f6;
+        color: #111827;
+      }
+      header {
+        padding: 10px 16px;
+        background: #111827;
+        color: #f9fafb;
+        display: flex;
+        gap: 16px;
+        align-items: baseline;
+      }
+      header h1 {
+        font-size: 15px;
+        margin: 0;
+      }
+      header code {
+        background: #374151;
+        padding: 1px 6px;
+        border-radius: 4px;
+        font-size: 12px;
+      }
+      main {
+        display: grid;
+        grid-template-columns: 1fr 1fr 380px;
+        gap: 12px;
+        padding: 12px;
+        height: calc(100vh - 44px);
+      }
+      .panel {
+        background: #fff;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+      .panel-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 10px;
+        border-bottom: 1px solid #e5e7eb;
+        background: #f9fafb;
+      }
+      .panel-head b {
+        font-size: 13px;
+      }
+      .panel-head button {
+        font: inherit;
+        font-size: 12px;
+        padding: 2px 10px;
+        border: 1px solid #d1d5db;
+        border-radius: 5px;
+        background: #fff;
+        cursor: pointer;
+      }
+      .panel-head button:hover {
+        background: #f3f4f6;
+      }
+      iframe {
+        flex: 1;
+        width: 100%;
+        border: 0;
+      }
+      .side {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        min-height: 0;
+      }
+      .side .panel {
+        flex: 1;
+        min-height: 0;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 4px 8px;
+        border-bottom: 1px solid #f3f4f6;
+        word-break: break-all;
+      }
+      #console-log {
+        flex: 1;
+        overflow: auto;
+        padding: 6px 10px;
+        font:
+          12px/1.5 ui-monospace,
+          monospace;
+      }
+      .log {
+        white-space: pre-wrap;
+        border-bottom: 1px dotted #f3f4f6;
+      }
+      .log-error {
+        color: #b91c1c;
+      }
+      .log-warning {
+        color: #b45309;
+      }
+      .log-shell {
+        color: #6b7280;
+        font-style: italic;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>icdp playground shell (Host)</h1>
+      <span>relay: <code>{{SHELL_ORIGIN}}</code></span>
+      <span
+        >drive it:
+        <code>agent-browser --cdp {{RELAY_PORT}} wait --text "icdp Playground"</code></span
+      >
+    </header>
+    <main>
+      <section class="panel">
+        <div class="panel-head">
+          <b>Target: playground</b>
+          <button id="reload-playground">Reload</button>
+          <button id="toggle-playground">Unpair</button>
+        </div>
+        <iframe id="frame-playground" src="{{APP_ORIGIN}}/" title="playground app"></iframe>
+      </section>
+      <section class="panel">
+        <div class="panel-head">
+          <b>Target: todo</b>
+          <button id="reload-todo">Reload</button>
+          <button id="toggle-todo">Unpair</button>
+        </div>
+        <iframe id="frame-todo" src="{{APP_ORIGIN}}/todo" title="todo app"></iframe>
+      </section>
+      <aside class="side">
+        <section class="panel" style="flex: 0 0 auto">
+          <div class="panel-head"><b>Targets (host.targets)</b></div>
+          <table>
+            <thead>
+              <tr>
+                <th>id</th>
+                <th>title</th>
+                <th>url</th>
+              </tr>
+            </thead>
+            <tbody id="targets"></tbody>
+          </table>
+        </section>
+        <section class="panel">
+          <div class="panel-head">
+            <b>Console (local session)</b>
+            <button id="clear-console">Clear</button>
+          </div>
+          <div id="console-log"></div>
+        </section>
+      </aside>
+    </main>
+    <script>
+      window.__APP_ORIGIN = "{{APP_ORIGIN}}";
+      window.__RELAY_WS = "{{RELAY_WS}}";
+    </script>
+    <script type="module" src="/shell.js"></script>
+  </body>
+</html>

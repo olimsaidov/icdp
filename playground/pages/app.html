@@ -1,0 +1,627 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>icdp Playground</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font:
+          14px/1.5 system-ui,
+          sans-serif;
+        color: #1f2937;
+        background: #fff;
+      }
+      main {
+        max-width: 880px;
+        margin: 0 auto;
+        padding: 16px 20px 600px;
+      }
+      h1 {
+        font-size: 20px;
+      }
+      h2 {
+        font-size: 15px;
+        margin: 0 0 10px;
+        border-bottom: 2px solid #6366f1;
+        display: inline-block;
+      }
+      section.card {
+        border: 1px solid #e5e7eb;
+        border-radius: 10px;
+        padding: 14px 16px;
+        margin: 14px 0;
+      }
+      label {
+        display: block;
+        margin: 6px 0 2px;
+        font-weight: 600;
+        font-size: 12.5px;
+      }
+      input,
+      textarea,
+      select,
+      button {
+        font: inherit;
+      }
+      input,
+      textarea,
+      select {
+        padding: 5px 8px;
+        border: 1px solid #d1d5db;
+        border-radius: 6px;
+        width: 280px;
+      }
+      button {
+        padding: 5px 14px;
+        border: 1px solid #d1d5db;
+        border-radius: 6px;
+        background: #f9fafb;
+        cursor: pointer;
+        margin: 3px 4px 3px 0;
+      }
+      button:hover {
+        background: #eef2ff;
+      }
+      button[disabled] {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      nav.tabs button[aria-selected="true"] {
+        background: #6366f1;
+        color: #fff;
+        border-color: #6366f1;
+      }
+      table {
+        border-collapse: collapse;
+      }
+      td,
+      th {
+        border: 1px solid #d1d5db;
+        padding: 4px 10px;
+      }
+      #state-output {
+        display: block;
+        white-space: pre-wrap;
+        font:
+          11.5px/1.5 ui-monospace,
+          monospace;
+        background: #f9fafb;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        padding: 8px;
+        max-height: 220px;
+        overflow: auto;
+      }
+      #mouse-pad {
+        width: 260px;
+        height: 90px;
+        background: #e0f2fe;
+        border: 1px dashed #0284c7;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        user-select: none;
+      }
+      #scroll-box {
+        width: 300px;
+        height: 110px;
+        overflow: auto;
+        border: 1px solid #9ca3af;
+      }
+      #scroll-box-inner {
+        height: 500px;
+        padding-top: 400px;
+      }
+      #offscreen-area {
+        height: 1400px;
+        padding-top: 1100px;
+      }
+      .display-none {
+        display: none;
+      }
+      .vis-hidden {
+        visibility: hidden;
+      }
+      .toast {
+        position: fixed;
+        right: 16px;
+        bottom: 16px;
+        background: #065f46;
+        color: #fff;
+        padding: 8px 14px;
+        border-radius: 8px;
+      }
+      .row {
+        display: flex;
+        gap: 24px;
+        flex-wrap: wrap;
+      }
+      #drop-zone {
+        width: 180px;
+        height: 64px;
+        border: 2px dashed #9ca3af;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+    </style>
+    <script>
+      window.__ICDP_ALLOWED_PARENTS = ["{{SHELL_ORIGIN}}"];
+    </script>
+    <script type="module" src="/frame-agent.js"></script>
+  </head>
+  <body>
+    <main>
+      <h1>icdp Playground</h1>
+      <p id="ready-text">
+        Playground ready. Load <span id="load-count">?</span> of this document. Current URL:
+        <code id="url-display"></code>
+      </p>
+      <nav aria-label="Pages">
+        <a id="link-page-two" href="/page-two" title="Second page"
+          >Go to page two (full navigation)</a
+        >
+      </nav>
+
+      <section class="card" aria-labelledby="spa-heading">
+        <h2 id="spa-heading">SPA tabs (history.pushState)</h2>
+        <nav class="tabs" aria-label="SPA tabs">
+          <button data-tab="overview" aria-selected="true">Overview</button>
+          <button data-tab="reports" aria-selected="false">Reports</button>
+          <button data-tab="settings" aria-selected="false">Settings</button>
+        </nav>
+        <p>Active tab: <output id="active-tab">overview</output></p>
+      </section>
+
+      <section class="card" aria-labelledby="intake-heading">
+        <h2 id="intake-heading">Patient intake (forms)</h2>
+        <form id="intake-form">
+          <div class="row">
+            <div>
+              <label for="full-name">Full name</label>
+              <input
+                id="full-name"
+                data-testid="name-input"
+                placeholder="Jane Doe"
+                value=""
+                required
+              />
+              <label for="email">Email</label>
+              <input
+                id="email"
+                type="email"
+                placeholder="Email address"
+                value="initial@example.test"
+                aria-describedby="email-help"
+              />
+              <span id="email-help">We never share it</span>
+              <label for="birth-date">Birth date</label>
+              <input id="birth-date" type="date" value="1990-05-04" />
+              <label for="visit-time">Visit time</label>
+              <input id="visit-time" type="time" value="09:30" />
+              <label for="quantity">Quantity (0-10)</label>
+              <input id="quantity" type="number" min="0" max="10" value="2" />
+            </div>
+            <div>
+              <input id="search" type="search" aria-label="Search" placeholder="Search records" />
+              <input id="password" type="password" aria-label="Password" value="secret" />
+              <input id="phone" type="tel" aria-label="Phone" value="+15550100" />
+              <label for="notes">Visit notes</label>
+              <textarea id="notes" placeholder="Notes placeholder">Initial note</textarea>
+              <div
+                id="editable"
+                contenteditable="true"
+                role="textbox"
+                aria-label="Editable summary"
+                style="
+                  border: 1px solid #d1d5db;
+                  border-radius: 6px;
+                  min-height: 28px;
+                  width: 280px;
+                  padding: 4px 8px;
+                "
+              ></div>
+            </div>
+          </div>
+          <fieldset style="margin-top: 10px">
+            <legend>Choices</legend>
+            <label
+              ><input
+                type="checkbox"
+                id="follow-up"
+                aria-label="Follow-up required"
+                style="width: auto"
+              />
+              Follow-up required</label
+            >
+            <label
+              ><input
+                type="checkbox"
+                id="consent"
+                aria-label="Consent given"
+                checked
+                style="width: auto"
+              />
+              Consent given</label
+            >
+            <label
+              ><input
+                type="checkbox"
+                id="locked-choice"
+                aria-label="Locked choice"
+                disabled
+                style="width: auto"
+              />
+              Locked choice</label
+            >
+            <label
+              ><input
+                type="radio"
+                name="urgency"
+                id="routine"
+                aria-label="Routine"
+                checked
+                style="width: auto"
+              />
+              Routine</label
+            >
+            <label
+              ><input
+                type="radio"
+                name="urgency"
+                id="urgent"
+                aria-label="Urgent"
+                style="width: auto"
+              />
+              Urgent</label
+            >
+            <label for="care-team">Care team</label>
+            <select id="care-team" aria-label="Care team">
+              <option value="medical" selected>Medical</option>
+              <option value="social">Social Work</option>
+              <option value="blocked" disabled>Blocked</option>
+            </select>
+            <label for="tags">Tags (multi)</label>
+            <select id="tags" aria-label="Tags" multiple>
+              <option value="alpha">Alpha</option>
+              <option value="beta">Beta</option>
+              <option value="gamma">Gamma</option>
+            </select>
+          </fieldset>
+          <button id="submit-intake" data-testid="submit-btn" type="submit">Submit intake</button>
+          <button id="reset-intake" type="reset">Reset</button>
+        </form>
+      </section>
+
+      <section class="card" aria-labelledby="actions-heading">
+        <h2 id="actions-heading">Buttons &amp; actions</h2>
+        <button id="counter-btn" type="button">
+          Clicked <span id="click-count">0</span> times
+        </button>
+        <button id="dbl-btn" type="button">Double-click me</button>
+        <button id="hover-btn" type="button">Hover me</button>
+        <button id="disabled-btn" type="button" disabled>Disabled</button>
+        <button id="icon-btn" type="button" aria-label="Star this">
+          <span aria-hidden="true">★</span>
+        </button>
+        <button id="img-btn" type="button">
+          <img
+            alt="Rocket action"
+            src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
+            width="12"
+            height="12"
+          />
+        </button>
+        <button id="titled-btn" type="button" title="Titled action">Title Action</button>
+        <button class="bulk" id="bulk-one" type="button">Bulk One</button>
+        <button class="bulk" id="bulk-two" type="button">Bulk Two</button>
+        <button class="bulk" id="bulk-three" type="button">Bulk Three</button>
+      </section>
+
+      <section class="card" aria-labelledby="async-heading">
+        <h2 id="async-heading">Async zone (waits)</h2>
+        <p>Uptime: <output id="uptime">0</output>s</p>
+        <button id="load-data" type="button">Load lab results (1.5s)</button>
+        <button id="show-toast" type="button">Show toast (1s)</button>
+        <button id="reveal-late" type="button">Reveal element (2s)</button>
+        <div id="lab-results" aria-live="polite"></div>
+        <div id="late-zone"></div>
+      </section>
+
+      <section class="card" aria-labelledby="console-heading">
+        <h2 id="console-heading">Console zone</h2>
+        <button id="log-object" type="button">console.log object</button>
+        <button id="log-warning" type="button">console.warn</button>
+        <button id="log-error" type="button">console.error</button>
+        <button id="throw-async" type="button">Throw in setTimeout</button>
+      </section>
+
+      <section class="card" aria-labelledby="content-heading">
+        <h2 id="content-heading">Content</h2>
+        <p id="copy">Stable copy for get text.</p>
+        <div id="html-target">
+          <span data-part="inner">Inner <b>HTML</b></span>
+        </div>
+        <table aria-label="Vitals table">
+          <tr>
+            <th>Name</th>
+            <th>Value</th>
+          </tr>
+          <tr>
+            <td>Pulse</td>
+            <td id="pulse-cell">72</td>
+          </tr>
+          <tr>
+            <td>Temp</td>
+            <td>36.6</td>
+          </tr>
+        </table>
+        <details id="details">
+          <summary>Details summary</summary>
+          <p>Details body text</p>
+        </details>
+        <shadow-control></shadow-control>
+        <iframe
+          id="nested-frame"
+          title="Nested frame"
+          srcdoc="<button>Nested frame button</button>"
+          style="width: 240px; height: 48px"
+        ></iframe>
+        <div id="drop-zone">Drop zone</div>
+      </section>
+
+      <section class="card" aria-labelledby="hidden-heading">
+        <h2 id="hidden-heading">Hidden cases (must NOT appear in snapshots)</h2>
+        <button id="hidden-attr" hidden>Hidden attr action</button>
+        <button id="display-none" class="display-none">Display none action</button>
+        <button id="vis-hidden" class="vis-hidden">Visibility hidden action</button>
+        <div inert><button id="inert-action">Inert action</button></div>
+        <div aria-hidden="true"><button id="aria-hidden-action">Aria hidden action</button></div>
+      </section>
+
+      <section class="card" aria-labelledby="interaction-heading">
+        <h2 id="interaction-heading">Mouse, keyboard &amp; scroll</h2>
+        <div class="row">
+          <div id="mouse-pad">Mouse pad (move/down/up/wheel)</div>
+          <div>
+            <label for="keyboard-input">Keyboard input</label>
+            <input id="keyboard-input" value="" />
+            <div id="scroll-box">
+              <div id="scroll-box-inner">
+                <button id="deep-button" type="button">Deep button</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" aria-labelledby="state-heading">
+        <h2 id="state-heading">Live state (window.playgroundState())</h2>
+        <output id="state-output" data-testid="state-output"></output>
+      </section>
+
+      <div id="offscreen-area">
+        <label for="offscreen-input">Offscreen control</label>
+        <input id="offscreen-input" value="offscreen" />
+      </div>
+    </main>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const loads = Number(sessionStorage.getItem("icdp-loads") || 0) + 1;
+      sessionStorage.setItem("icdp-loads", String(loads));
+      $("load-count").textContent = String(loads);
+      $("url-display").textContent = location.href;
+
+      window.__state = {
+        ready: true,
+        loadCount: loads,
+        clicks: {},
+        dblClicks: 0,
+        hovered: false,
+        focus: "",
+        submits: 0,
+        resets: 0,
+        keys: [],
+        mouse: { moves: 0, downs: 0, ups: 0, wheels: 0 },
+        activeTab: "overview",
+        labResults: 0,
+      };
+      const state = window.__state;
+
+      window.playgroundState = () => ({
+        ...state,
+        url: location.href,
+        name: $("full-name").value,
+        email: $("email").value,
+        search: $("search").value,
+        notes: $("notes").value,
+        keyboard: $("keyboard-input").value,
+        editable: $("editable").textContent,
+        followUp: $("follow-up").checked,
+        consent: $("consent").checked,
+        urgent: $("urgent").checked,
+        careTeam: $("care-team").value,
+        tags: Array.from($("tags").selectedOptions).map((o) => o.value),
+        uptime: Number($("uptime").value || $("uptime").textContent),
+        scrollY: Math.round(window.scrollY),
+        scrollBoxTop: Math.round($("scroll-box").scrollTop),
+        offscreenTop: Math.round($("offscreen-input").getBoundingClientRect().top),
+      });
+
+      function renderState() {
+        $("state-output").textContent = JSON.stringify(window.playgroundState(), null, 1);
+      }
+
+      function recordClick(id) {
+        state.clicks[id] = (state.clicks[id] || 0) + 1;
+        renderState();
+      }
+
+      // SPA tabs
+      for (const tab of document.querySelectorAll("nav.tabs button")) {
+        tab.addEventListener("click", () => {
+          for (const other of document.querySelectorAll("nav.tabs button"))
+            other.setAttribute("aria-selected", "false");
+          tab.setAttribute("aria-selected", "true");
+          state.activeTab = tab.dataset.tab;
+          $("active-tab").textContent = tab.dataset.tab;
+          history.pushState({}, "", "/tab/" + tab.dataset.tab);
+          $("url-display").textContent = location.href;
+          renderState();
+        });
+      }
+      window.addEventListener("popstate", () => {
+        $("url-display").textContent = location.href;
+        renderState();
+      });
+
+      // Buttons & actions
+      $("counter-btn").addEventListener("click", () => {
+        $("click-count").textContent = String((state.clicks["counter-btn"] || 0) + 1);
+      });
+      $("dbl-btn").addEventListener("dblclick", () => {
+        state.dblClicks += 1;
+        $("dbl-btn").textContent = "Double-clicked x" + state.dblClicks;
+        renderState();
+      });
+      $("hover-btn").addEventListener("mouseenter", () => {
+        state.hovered = true;
+        $("hover-btn").textContent = "Hovered!";
+        renderState();
+      });
+
+      for (const button of document.querySelectorAll("button")) {
+        button.addEventListener("click", () => recordClick(button.id || button.textContent.trim()));
+        button.addEventListener("focus", () => {
+          state.focus = button.id;
+          renderState();
+        });
+      }
+      for (const control of document.querySelectorAll(
+        "input, textarea, select, [contenteditable]",
+      )) {
+        control.addEventListener("focus", () => {
+          state.focus = control.id;
+          renderState();
+        });
+        control.addEventListener("input", renderState);
+        control.addEventListener("change", renderState);
+      }
+
+      $("intake-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        state.submits += 1;
+        console.log("intake submitted", { name: $("full-name").value, email: $("email").value });
+        renderState();
+      });
+      $("intake-form").addEventListener("reset", () => {
+        state.resets += 1;
+        setTimeout(renderState, 0);
+      });
+
+      // Async zone
+      let uptime = 0;
+      setInterval(() => {
+        uptime += 1;
+        $("uptime").textContent = String(uptime);
+      }, 1000);
+      $("load-data").addEventListener("click", () => {
+        $("lab-results").textContent = "Loading…";
+        setTimeout(() => {
+          state.labResults += 1;
+          $("lab-results").innerHTML =
+            "<ul><li>Hemoglobin: 14.1</li><li>Glucose: 5.2</li><li>WBC: 6.8</li></ul><p id='lab-done'>Lab results loaded</p>";
+          renderState();
+        }, 1500);
+      });
+      $("show-toast").addEventListener("click", () => {
+        setTimeout(() => {
+          const toast = document.createElement("div");
+          toast.className = "toast";
+          toast.id = "toast";
+          toast.textContent = "Saved successfully";
+          document.body.appendChild(toast);
+          setTimeout(() => toast.remove(), 3000);
+        }, 1000);
+      });
+      $("reveal-late").addEventListener("click", () => {
+        setTimeout(() => {
+          $("late-zone").innerHTML = "<button id='late-button' type='button'>Late button</button>";
+        }, 2000);
+      });
+
+      // Console zone
+      $("log-object").addEventListener("click", () =>
+        console.log("patient", {
+          id: 42,
+          name: "Jane Doe",
+          vitals: { pulse: 72, temp: 36.6 },
+          tags: ["a", "b"],
+        }),
+      );
+      $("log-warning").addEventListener("click", () => console.warn("low disk space", 13.37));
+      $("log-error").addEventListener("click", () => console.error(new Error("synthetic failure")));
+      $("throw-async").addEventListener("click", () =>
+        setTimeout(() => {
+          throw new Error("async boom");
+        }, 10),
+      );
+
+      // Shadow DOM
+      customElements.define(
+        "shadow-control",
+        class extends HTMLElement {
+          connectedCallback() {
+            if (this.shadowRoot) return;
+            this.attachShadow({ mode: "open" }).innerHTML =
+              '<button id="shadow-action" type="button">Shadow Action</button>';
+            this.shadowRoot
+              .getElementById("shadow-action")
+              .addEventListener("click", () => recordClick("shadow-action"));
+          }
+        },
+      );
+
+      // Mouse / keyboard plumbing
+      document.addEventListener("keydown", (e) => {
+        state.keys.push("down:" + e.key);
+        renderState();
+      });
+      document.addEventListener("keyup", (e) => {
+        state.keys.push("up:" + e.key);
+        renderState();
+      });
+      document.addEventListener("mousemove", () => {
+        state.mouse.moves += 1;
+        renderState();
+      });
+      document.addEventListener("mousedown", () => {
+        state.mouse.downs += 1;
+        renderState();
+      });
+      document.addEventListener("mouseup", () => {
+        state.mouse.ups += 1;
+        renderState();
+      });
+      document.addEventListener(
+        "wheel",
+        () => {
+          state.mouse.wheels += 1;
+          renderState();
+        },
+        { passive: true },
+      );
+
+      console.log("playground booted, load", loads);
+      renderState();
+    </script>
+  </body>
+</html>
