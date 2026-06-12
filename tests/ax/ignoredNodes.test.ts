@@ -68,10 +68,29 @@ describe("ignored nodes", () => {
     expect(button).not.toHaveProperty("name");
   });
 
-  test("ignoredReason value is a plain boolean", () => {
+  test("an element-variant reason value is a plain boolean", () => {
     const { nodes, backendIdFor } = buildContext(`<button aria-hidden="true">x</button>`);
     for (const reason of byBackendId(nodes, backendIdFor("button"))?.ignoredReasons ?? [])
       expect(reason.value).toEqual({ type: "boolean", value: true });
+  });
+
+  test("an ancestor-derived reason carries a relatedNodes idref to the offending ancestor", () => {
+    const { nodes, backendIdFor } = buildContext(
+      `<div aria-hidden="true"><button>x</button></div>`,
+    );
+    const reason = byBackendId(nodes, backendIdFor("button"))?.ignoredReasons?.find(
+      (r) => r.name === "ariaHiddenSubtree",
+    );
+    expect(reason?.value.type).toBe("idref");
+    expect(reason?.value.relatedNodes?.[0]?.backendDOMNodeId).toBe(backendIdFor("div"));
+  });
+
+  test("ignored text is anonymized to role:none on getFullAXTree (no StaticText leaks the text)", () => {
+    const nodes = build(`<div aria-hidden="true">secret</div>`);
+    expect(nodes.some((n) => n.role?.value === "StaticText" && n.name?.value === "secret")).toBe(
+      false,
+    );
+    expect(nodes.some((n) => n.ignored && n.role?.value === "none")).toBe(true);
   });
 
   test("explicit role=presentation => ignored presentationalRole, inherited by list items", () => {
@@ -107,7 +126,7 @@ describe("ignored nodes", () => {
           (ignored) none
           main
             (ignored) none
-              (ignored) StaticText "Hidden"
+              (ignored) none
             button "Shown"
               StaticText "Shown"
       "

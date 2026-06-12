@@ -180,7 +180,7 @@ function isPresentational(el: Element): boolean {
 // Containers whose children are required-owned and so inherit presentational.
 const PRESENTATIONAL_INHERITS = new Set(["ul", "ol", "table", "thead", "tbody", "tfoot", "tr"]);
 
-function ignoredReasonFor(el: Element): AXProperty | undefined {
+function ignoredReasonFor(el: Element, options: AXTreeOptions): AXProperty | undefined {
   const style = getComputedStyle(el);
   // The `hidden` attribute computes to display:none; Chromium reports notRendered
   // (it has no bespoke `hidden`/`hiddenRoot` ignored reason).
@@ -196,11 +196,27 @@ function ignoredReasonFor(el: Element): AXProperty | undefined {
     const parentStyle = getComputedStyle(parent);
     if ((parent as HTMLElement).hidden || parentStyle.display === "none")
       return ignoredReason("notRendered");
-    if (parent.hasAttribute("inert")) return ignoredReason("inertSubtree");
-    if (parent.getAttribute("aria-hidden") === "true") return ignoredReason("ariaHiddenSubtree");
+    if (parent.hasAttribute("inert")) return ancestorReason("inertSubtree", parent, options);
+    if (parent.getAttribute("aria-hidden") === "true")
+      return ancestorReason("ariaHiddenSubtree", parent, options);
   }
 
   return isInaccessible(el) ? ignoredReason("uninteresting") : undefined;
+}
+
+// Ancestor-derived ignored reasons carry a relatedNodes idref to the offending
+// ancestor element instead of a plain boolean (Chromium's CreateRelatedNodeListValue).
+function ancestorReason(
+  name: AXPropertyName,
+  ancestor: Element,
+  options: AXTreeOptions,
+): AXProperty {
+  const related: Protocol.Accessibility.AXRelatedNode = {
+    backendDOMNodeId: options.registry.backendIdFor(ancestor),
+  };
+  const id = ancestor.getAttribute("id");
+  if (id) related.idref = id;
+  return { name, value: { type: "idref", relatedNodes: [related] } };
 }
 
 function boolAttr(el: Element, name: string): boolean | undefined {
@@ -244,11 +260,17 @@ const RENDERED_IGNORED_REASONS = new Set<AXPropertyName>([
   "presentationalRole",
 ]);
 
-/** The subtree-variant of an element's ignored reason, inherited by descendants. */
-function subtreeReason(name: AXPropertyName): AXProperty {
+/** The subtree-variant reason inherited by an ignored element's descendants,
+ *  pointing back at that element (the offending ancestor) for aria-hidden/inert. */
+function subtreeReason(
+  name: AXPropertyName,
+  ancestor: Element,
+  options: AXTreeOptions,
+): AXProperty {
   if (name === "ariaHiddenElement" || name === "ariaHiddenSubtree")
-    return ignoredReason("ariaHiddenSubtree");
-  if (name === "inertElement" || name === "inertSubtree") return ignoredReason("inertSubtree");
+    return ancestorReason("ariaHiddenSubtree", ancestor, options);
+  if (name === "inertElement" || name === "inertSubtree")
+    return ancestorReason("inertSubtree", ancestor, options);
   return ignoredReason(name);
 }
 
@@ -268,10 +290,16 @@ function addProp(
     props.push({ name, value: ax(type, value) });
 }
 
+function nativeDisabled(el: Element): boolean {
+  return "disabled" in el && Boolean((el as any).disabled);
+}
+
 function isDisabled(el: Element): boolean {
-  return (
-    boolAttr(el, "aria-disabled") === true || ("disabled" in el && Boolean((el as any).disabled))
-  );
+  if (nativeDisabled(el) || boolAttr(el, "aria-disabled") === true) return true;
+  // aria-disabled propagates to descendants (Chromium's GetRestriction).
+  for (let parent = el.parentElement; parent; parent = parent.parentElement)
+    if (parent.getAttribute("aria-disabled") === "true") return true;
+  return false;
 }
 
 // Roles for which Chromium emits readonly/required/multiselectable (always, even
@@ -320,7 +348,7 @@ function contentEditable(el: Element): boolean {
 }
 
 function isFocusable(el: Element): boolean {
-  if (isDisabled(el)) return false;
+  if (nativeDisabled(el)) return false; // aria-disabled does not remove focusability
   const html = el as HTMLElement;
   if (html.tabIndex >= 0) return true;
   if (el.localName === "a" && el.hasAttribute("href")) return true;
@@ -387,6 +415,12 @@ function rangeValue(el: Element, role: string): number | undefined {
   // An indeterminate <progress> (no value attribute) has no value.
   if (el instanceof HTMLProgressElement) return el.hasAttribute("value") ? el.value : undefined;
   if (el instanceof HTMLMeterElement) return el.value;
+  // An author range role without aria-valuenow falls back to the ARIA default:
+  // the midpoint for slider/scrollbar/separator, the minimum for spinbutton.
+  const lo = min ?? 0;
+  const hi = max ?? 100;
+  if (role === "slider" || role === "scrollbar" || role === "separator") return (lo + hi) / 2;
+  if (role === "spinbutton") return lo;
   return undefined;
 }
 
@@ -956,12 +990,16 @@ function buildAX(
     const text = textValue(node);
     if (!text) return [];
     const nodeId = axIdFor(node);
+    // An ignored text node is anonymized to role:none with no name on the
+    // getFullAXTree path, like any other ignored node; queryAXTree's
+    // forceNameAndRole keeps the real StaticText role + text.
+    const anonymized = Boolean(inheritedIgnore) && !options.forceNameAndRole;
     out.push({
       nodeId,
       ignored: Boolean(inheritedIgnore),
       ...(inheritedIgnore ? { ignoredReasons: [inheritedIgnore] } : {}),
-      role: roleNameValue("StaticText"),
-      name: ax("computedString", text),
+      role: anonymized ? ax("role", "none") : roleNameValue("StaticText"),
+      ...(anonymized ? {} : { name: ax("computedString", text) }),
       parentId,
       backendDOMNodeId: options.registry.backendIdFor(node.parentElement || node),
       childIds: [],
@@ -995,7 +1033,7 @@ function buildAX(
   }
 
   if (!isElement(node)) return [];
-  const reasonIgnored = ignoredReasonFor(node) ?? inheritedIgnore;
+  const reasonIgnored = ignoredReasonFor(node, options) ?? inheritedIgnore;
   if (reasonIgnored) {
     const nodeId = axIdFor(node);
     // Recurse into still-rendered-but-ignored subtrees (aria-hidden / inert /
@@ -1005,7 +1043,7 @@ function buildAX(
     const childReason =
       reasonIgnored.name === "presentationalRole" && !PRESENTATIONAL_INHERITS.has(node.localName)
         ? undefined
-        : subtreeReason(reasonIgnored.name);
+        : subtreeReason(reasonIgnored.name, node, options);
     const children =
       RENDERED_IGNORED_REASONS.has(reasonIgnored.name) && depthLeft > 0
         ? composedChildren(node).flatMap((child) =>

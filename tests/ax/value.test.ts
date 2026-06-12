@@ -30,6 +30,11 @@ describe("value handling", () => {
     expect(byRole(nodes, "slider")?.value).toEqual({ type: "number", value: 7 });
   });
 
+  test("an author slider without aria-valuenow defaults to the midpoint", () => {
+    const nodes = build(`<div role="slider" aria-valuemin="0" aria-valuemax="10">x</div>`);
+    expect(byRole(nodes, "slider")?.value).toEqual({ type: "number", value: 5 });
+  });
+
   test("aria-valuenow is clamped to the resolved min/max", () => {
     const over = build(
       `<div role="slider" aria-valuenow="50" aria-valuemin="0" aria-valuemax="10">x</div>`,

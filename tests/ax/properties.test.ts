@@ -55,6 +55,13 @@ describe("widget & global state properties", () => {
     expect(propNames(button)).not.toContain("focusable");
   });
 
+  test("aria-disabled propagates from an ancestor to descendant widgets (but keeps focusability)", () => {
+    const button = byRole(build(`<div aria-disabled="true"><button>x</button></div>`), "button");
+    expect(prop(button, "disabled")).toEqual({ type: "boolean", value: true });
+    // aria-disabled (unlike native disabled) does not remove focusability:
+    expect(prop(button, "focusable")).toEqual({ type: "booleanOrUndefined", value: true });
+  });
+
   test("heading emits its level", () => {
     const nodes = build(`<h4>x</h4>`);
     expect(prop(byRole(nodes, "heading"), "level")).toEqual({ type: "integer", value: 4 });

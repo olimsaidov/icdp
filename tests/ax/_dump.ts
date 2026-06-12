@@ -92,13 +92,13 @@ export function allByRole(nodes: AXNode[], role: string): AXNode[] {
 
 /** The emitted node for a given DOM backend-node id (ignored nodes have role:none,
  *  so they can only be located by backend id, not by role). StaticText children
- *  reuse their parent element's backend id, so prefer the element's own node. */
+ *  reuse their parent element's backend id and are emitted before it (post-order),
+ *  so the element's own node is the last match. */
 export function byBackendId(
   nodes: AXNode[],
   backendId: Protocol.DOM.BackendNodeId,
 ): AXNode | undefined {
-  const matches = nodes.filter((node) => node.backendDOMNodeId === backendId);
-  return matches.find((node) => node.role?.value !== "StaticText") ?? matches[0];
+  return nodes.findLast((node) => node.backendDOMNodeId === backendId);
 }
 
 /** The ignored-reason names on a node. */
