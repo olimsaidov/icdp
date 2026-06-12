@@ -9,7 +9,15 @@ import {
   isHandshakeMessage,
   PROTOCOL_VERSION,
 } from "../protocol.ts";
-import { createDomRegistry, getFullAXTree, getPartialAXTree } from "./ax-tree.ts";
+import {
+  createDomRegistry,
+  getAXNodeAndAncestors,
+  getChildAXNodes,
+  getFullAXTree,
+  getPartialAXTree,
+  getRootAXNode,
+  queryAXTree,
+} from "./ax-tree.ts";
 
 type CdpMethod = keyof ProtocolMapping.Commands;
 type CdpParams<Method extends CdpMethod> = NonNullable<
@@ -497,12 +505,57 @@ function getStorageKey(): Protocol.Storage.GetStorageKeyResponse {
   return { storageKey: location.origin };
 }
 
-function getFullAccessibilityTree(): Protocol.Accessibility.GetFullAXTreeResponse {
-  return getFullAXTree({ document, frameId, registry });
+function axOptions() {
+  return { document, frameId, registry };
 }
 
-function getPartialAccessibilityTree(): Protocol.Accessibility.GetPartialAXTreeResponse {
-  return getPartialAXTree({ document, frameId, registry });
+/** Our DOM domain unifies nodeId with backendNodeId, so either resolves here. */
+function axTargetBackendId(params: {
+  backendNodeId?: number;
+  nodeId?: number;
+}): Protocol.DOM.BackendNodeId | undefined {
+  const id = Number(params.backendNodeId ?? params.nodeId);
+  return Number.isFinite(id) && id > 0 ? id : undefined;
+}
+
+function getFullAccessibilityTree(
+  params: CdpParams<"Accessibility.getFullAXTree"> = {} as CdpParams<"Accessibility.getFullAXTree">,
+): Protocol.Accessibility.GetFullAXTreeResponse {
+  return getFullAXTree(axOptions(), params.depth);
+}
+
+function getPartialAccessibilityTree(
+  params: CdpParams<"Accessibility.getPartialAXTree"> = {} as CdpParams<"Accessibility.getPartialAXTree">,
+): Protocol.Accessibility.GetPartialAXTreeResponse {
+  return getPartialAXTree(axOptions(), axTargetBackendId(params), params.fetchRelatives ?? true);
+}
+
+function getRootAccessibilityNode(): Protocol.Accessibility.GetRootAXNodeResponse {
+  return getRootAXNode(axOptions());
+}
+
+function getChildAccessibilityNodes(
+  params: CdpParams<"Accessibility.getChildAXNodes">,
+): Protocol.Accessibility.GetChildAXNodesResponse {
+  return getChildAXNodes(axOptions(), String(params.id));
+}
+
+function getAccessibilityNodeAndAncestors(
+  params: CdpParams<"Accessibility.getAXNodeAndAncestors"> = {} as CdpParams<"Accessibility.getAXNodeAndAncestors">,
+): Protocol.Accessibility.GetAXNodeAndAncestorsResponse {
+  const target = axTargetBackendId(params);
+  if (target == null) throw new Error("getAXNodeAndAncestors requires a nodeId or backendNodeId");
+  return getAXNodeAndAncestors(axOptions(), target);
+}
+
+function queryAccessibilityTree(
+  params: CdpParams<"Accessibility.queryAXTree"> = {} as CdpParams<"Accessibility.queryAXTree">,
+): Protocol.Accessibility.QueryAXTreeResponse {
+  return queryAXTree(axOptions(), {
+    target: axTargetBackendId(params),
+    accessibleName: params.accessibleName,
+    role: params.role,
+  });
 }
 
 function getDocument(
@@ -798,6 +851,10 @@ cdp.register("Accessibility", {
   enable: noop,
   getFullAXTree: getFullAccessibilityTree,
   getPartialAXTree: getPartialAccessibilityTree,
+  getRootAXNode: getRootAccessibilityNode,
+  getChildAXNodes: getChildAccessibilityNodes,
+  getAXNodeAndAncestors: getAccessibilityNodeAndAncestors,
+  queryAXTree: queryAccessibilityTree,
 });
 
 cdp.register("Animation", {

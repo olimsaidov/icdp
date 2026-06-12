@@ -23,6 +23,9 @@ type AXTreeOptions = {
   document: Document;
   frameId: Protocol.Page.FrameId;
   registry: DomRegistry;
+  /** When set, ignored nodes keep their real role + name (Chromium's
+   *  force_name_and_role, used by queryAXTree) instead of role:none + no name. */
+  forceNameAndRole?: boolean;
 };
 
 const nodeToAXId = new WeakMap<Node, string>();
@@ -52,6 +55,23 @@ function ax(type: AXValueType, value?: unknown): AXValue {
   return value === undefined ? { type: "valueUndefined" } : { type, value };
 }
 
+// Internal (non-ARIA) role tokens are serialized with AXValue type "internalRole"
+// rather than "role" (Chromium's AXObject::RoleName is_internal flag). ARIA-mapped
+// tokens like "generic"/"button" keep type "role".
+const INTERNAL_ROLES = new Set([
+  "StaticText",
+  "RootWebArea",
+  "ListMarker",
+  "MathMLMath",
+  "MathMLIdentifier",
+  "MathMLOperator",
+  "MathMLNumber",
+]);
+
+function roleNameValue(role: string): AXValue {
+  return ax(INTERNAL_ROLES.has(role) ? "internalRole" : "role", role);
+}
+
 function axIdFor(node: Node): string {
   const existing = nodeToAXId.get(node);
   if (existing) return existing;
@@ -75,7 +95,9 @@ function textValue(node: Text): string {
 function explicitRole(el: Element): string | null {
   const attr = el.getAttribute("role");
   if (!attr) return null;
-  for (const role of attr.trim().split(/\s+/)) {
+  for (const token of attr.trim().split(/\s+/)) {
+    // ARIA 1.2 introduced "image" as a synonym for "img" (aria-query only has img).
+    const role = token === "image" ? "img" : token;
     if (ariaRoles.has(role as never)) return role;
   }
   return null;
@@ -136,7 +158,9 @@ function roleOf(el: Element): string | null {
 
 function ignoredReasonFor(el: Element): AXProperty | undefined {
   const style = getComputedStyle(el);
-  if ((el as HTMLElement).hidden) return ignoredReason("hidden");
+  // The `hidden` attribute computes to display:none; Chromium reports notRendered
+  // (it has no bespoke `hidden`/`hiddenRoot` ignored reason).
+  if ((el as HTMLElement).hidden) return ignoredReason("notRendered");
   if (el.hasAttribute("inert")) return ignoredReason("inertElement");
   if (el.getAttribute("aria-hidden") === "true") return ignoredReason("ariaHiddenElement");
   if (style.display === "none") return ignoredReason("notRendered");
@@ -146,7 +170,7 @@ function ignoredReasonFor(el: Element): AXProperty | undefined {
   for (let parent = el.parentElement; parent; parent = parent.parentElement) {
     const parentStyle = getComputedStyle(parent);
     if ((parent as HTMLElement).hidden || parentStyle.display === "none")
-      return ignoredReason("hiddenRoot");
+      return ignoredReason("notRendered");
     if (parent.hasAttribute("inert")) return ignoredReason("inertSubtree");
     if (parent.getAttribute("aria-hidden") === "true") return ignoredReason("ariaHiddenSubtree");
   }
@@ -182,6 +206,26 @@ function ignoredReason(name: AXPropertyName): AXProperty {
   return { name, value: ax("boolean", true) };
 }
 
+// Ignored reasons whose subtree is still rendered (just excluded from the AX
+// computation). Chromium keeps these descendants in the tree ("ignored but
+// included"), so we recurse into them. The remaining reasons (notRendered,
+// notVisible, hidden, hiddenRoot, uninteresting) mark genuinely unrendered
+// subtrees, which Chromium also drops — so we keep pruning those.
+const RENDERED_IGNORED_REASONS = new Set<AXPropertyName>([
+  "ariaHiddenElement",
+  "ariaHiddenSubtree",
+  "inertElement",
+  "inertSubtree",
+]);
+
+/** The subtree-variant of an element's ignored reason, inherited by descendants. */
+function subtreeReason(name: AXPropertyName): AXProperty {
+  if (name === "ariaHiddenElement" || name === "ariaHiddenSubtree")
+    return ignoredReason("ariaHiddenSubtree");
+  if (name === "inertElement" || name === "inertSubtree") return ignoredReason("inertSubtree");
+  return ignoredReason(name);
+}
+
 function addProp(
   props: AXProperty[],
   name: AXPropertyName,
@@ -204,11 +248,57 @@ function isDisabled(el: Element): boolean {
   );
 }
 
+// Roles for which Chromium emits readonly/required/multiselectable (always, even
+// when false). Mirrors RoleAllows{Readonly,Required,Multiselectable} in
+// inspector_type_builder_helper.cc.
+const READONLY_ROLES = new Set([
+  "grid",
+  "gridcell",
+  "textbox",
+  "columnheader",
+  "rowheader",
+  "treegrid",
+]);
+const REQUIRED_ROLES = new Set([
+  "combobox",
+  "gridcell",
+  "listbox",
+  "radiogroup",
+  "spinbutton",
+  "textbox",
+  "tree",
+  "columnheader",
+  "rowheader",
+  "treegrid",
+]);
+const MULTISELECTABLE_ROLES = new Set(["grid", "listbox", "tablist", "treegrid", "tree"]);
+
+function readonlyState(el: Element): boolean {
+  if ("readOnly" in el && Boolean((el as any).readOnly)) return true;
+  return boolAttr(el, "aria-readonly") === true;
+}
+
+function requiredState(el: Element): boolean {
+  if ("required" in el && Boolean((el as any).required)) return true;
+  return boolAttr(el, "aria-required") === true;
+}
+
+function multiselectableState(el: Element): boolean {
+  if (el instanceof HTMLSelectElement && el.multiple) return true;
+  return boolAttr(el, "aria-multiselectable") === true;
+}
+
+function contentEditable(el: Element): boolean {
+  const value = el.getAttribute("contenteditable");
+  return value === "" || value === "true" || value === "plaintext-only";
+}
+
 function isFocusable(el: Element): boolean {
   if (isDisabled(el)) return false;
   const html = el as HTMLElement;
   if (html.tabIndex >= 0) return true;
   if (el.localName === "a" && el.hasAttribute("href")) return true;
+  if (contentEditable(el)) return true;
   return ["button", "input", "select", "textarea"].includes(el.localName);
 }
 
@@ -248,27 +338,67 @@ function nativeMax(el: Element, role: string): number | undefined {
   return undefined;
 }
 
-function valueFor(el: Element): AXValue | undefined {
+// Roles whose value is a number on a range (slider/spinbutton/progress/etc.).
+const RANGE_ROLES = new Set([
+  "slider",
+  "scrollbar",
+  "spinbutton",
+  "progressbar",
+  "meter",
+  "separator",
+]);
+
+/** The numeric value for a range-valued element, or undefined to omit it.
+ *  aria-valuenow wins (clamped to min/max); otherwise the native value. */
+function rangeValue(el: Element, role: string): number | undefined {
+  const min = numberAttr(el, "aria-valuemin") ?? nativeMin(el, role);
+  const max = numberAttr(el, "aria-valuemax") ?? nativeMax(el, role);
+  const clamp = (n: number) => Math.min(max ?? n, Math.max(min ?? n, n));
+  const ariaNow = numberAttr(el, "aria-valuenow");
+  if (ariaNow != null) return clamp(ariaNow);
+  if (el instanceof HTMLInputElement && (el.type === "range" || el.type === "number"))
+    return Number.isFinite(el.valueAsNumber) ? el.valueAsNumber : undefined;
+  // An indeterminate <progress> (no value attribute) has no value.
+  if (el instanceof HTMLProgressElement) return el.hasAttribute("value") ? el.value : undefined;
+  if (el instanceof HTMLMeterElement) return el.value;
+  return undefined;
+}
+
+function selectValue(el: HTMLSelectElement): AXValue | undefined {
+  if (el.multiple) return undefined; // multi-select has no single value
+  const option = el.selectedOptions[0];
+  if (!option) return undefined;
+  const text = (option.getAttribute("aria-label") || option.textContent || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text ? ax("string", text) : undefined;
+}
+
+function valueFor(el: Element, role: string): AXValue | undefined {
   const override = (el as any).__agentAX?.value;
   if (override !== undefined)
     return ax(typeof override === "number" ? "number" : "string", override);
-  if (el instanceof HTMLInputElement && (el.type === "range" || el.type === "number")) {
-    const number = Number(el.value);
-    return Number.isFinite(number) ? ax("number", number) : ax("string", el.value);
-  }
+
   if (
-    el instanceof HTMLInputElement ||
-    el instanceof HTMLTextAreaElement ||
-    el instanceof HTMLSelectElement
+    RANGE_ROLES.has(role) ||
+    el instanceof HTMLProgressElement ||
+    el instanceof HTMLMeterElement
   ) {
-    return ax("string", el.value);
+    const number = rangeValue(el, role);
+    return number == null ? undefined : ax("number", number);
   }
-  if (el instanceof HTMLProgressElement || el instanceof HTMLMeterElement)
-    return ax("number", el.value);
-  const now = el.getAttribute("aria-valuenow");
-  if (now == null) return undefined;
-  const number = Number(now);
-  return Number.isFinite(number) ? ax("number", number) : ax("string", now);
+
+  // <select> reports the displayed text of its selected option, not el.value.
+  if (el instanceof HTMLSelectElement) return selectValue(el);
+
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+    // Passwords are masked; empty values are omitted (Chromium's !value.empty()).
+    if (el instanceof HTMLInputElement && el.type === "password")
+      return el.value ? ax("string", "•".repeat(el.value.length)) : undefined;
+    return el.value ? ax("string", el.value) : undefined;
+  }
+
+  return undefined;
 }
 
 function ariaBool(el: Element, name: string): boolean | undefined {
@@ -291,20 +421,23 @@ function relatedNodesFor(
   options: AXTreeOptions,
   el: Element,
   ids: string[],
+  includeText: boolean,
 ): Protocol.Accessibility.AXRelatedNode[] {
   return ids.flatMap((idref) => {
     const related = el.ownerDocument.getElementById(idref);
     if (!related) return [];
-    return [
-      {
-        backendDOMNodeId: options.registry.backendIdFor(related),
-        idref,
-        text:
-          computeAccessibleName(related) ||
-          related.textContent?.replace(/\s+/g, " ").trim() ||
-          undefined,
-      },
-    ];
+    const node: Protocol.Accessibility.AXRelatedNode = {
+      backendDOMNodeId: options.registry.backendIdFor(related),
+      idref,
+    };
+    // Chromium only attaches `text` on the labelledby (nodeList) relation; idref
+    // and idrefList relations carry the bare related node.
+    if (includeText) {
+      const text =
+        computeAccessibleName(related) || related.textContent?.replace(/\s+/g, " ").trim();
+      if (text) node.text = text;
+    }
+    return [node];
   });
 }
 
@@ -343,13 +476,14 @@ function addRelationProp(
   const value: AXValue = { type };
   if (!settings.omitValue && type === "idref") value.value = ids[0];
   if (!settings.omitValue && type === "idrefList") value.value = ids.join(" ");
-  const relatedNodes = relatedNodesFor(options, el, ids);
+  const relatedNodes = relatedNodesFor(options, el, ids, type === "nodeList");
   if (relatedNodes.length) value.relatedNodes = relatedNodes;
   props.push({ name, value });
 }
 
 function roleSupportsAria(role: string, attr: ARIAProperty): boolean {
-  const definition = ariaRoles.get(role as never);
+  // "image" is our serialized name for the ARIA "img" role; look up img's definition.
+  const definition = ariaRoles.get((role === "image" ? "img" : role) as never);
   return !definition || attr in definition.props || attr in definition.requiredProps;
 }
 
@@ -367,67 +501,160 @@ function addAriaProp(
   addProp(props, name, type, value, options);
 }
 
+const CHECK_DEFAULT_FALSE_ROLES = new Set([
+  "checkbox",
+  "radio",
+  "switch",
+  "menuitemcheckbox",
+  "menuitemradio",
+]);
+const SELECTABLE_ROLES = new Set([
+  "option",
+  "tab",
+  "row",
+  "gridcell",
+  "treeitem",
+  "columnheader",
+  "rowheader",
+]);
+
+/** The live-region status (aria-live, or an implicit-live role), or undefined. */
+function liveStatus(el: Element, role: string): string | undefined {
+  const aria = el.getAttribute("aria-live");
+  if (aria && aria !== "off") return aria;
+  if (role === "alert") return "assertive";
+  if (role === "status" || role === "log") return "polite";
+  return undefined;
+}
+
+/** The invalid token ("false"/"true"/"grammar"/"spelling"), or undefined. */
+function invalidToken(el: Element): string | undefined {
+  const aria = el.getAttribute("aria-invalid");
+  if (aria === "grammar" || aria === "spelling") return aria;
+  if (aria === "true" || aria === "") return "true";
+  if (aria === "false") return "false";
+  // Native form controls always carry an invalid state (default false).
+  if (
+    el instanceof HTMLInputElement ||
+    el instanceof HTMLTextAreaElement ||
+    el instanceof HTMLSelectElement
+  )
+    return "false";
+  return undefined;
+}
+
+/** The editable token ("plaintext"/"richtext") for editable elements. */
+function editableToken(el: Element): string | undefined {
+  if (contentEditable(el))
+    return el.getAttribute("contenteditable") === "plaintext-only" ? "plaintext" : "richtext";
+  if (el instanceof HTMLTextAreaElement) return "plaintext";
+  if (el instanceof HTMLInputElement)
+    return ["", "text", "search", "email", "url", "tel", "password"].includes(el.type)
+      ? "plaintext"
+      : undefined;
+  return undefined;
+}
+
+function isSettable(el: Element): boolean {
+  return (
+    el instanceof HTMLInputElement ||
+    el instanceof HTMLTextAreaElement ||
+    el instanceof HTMLSelectElement ||
+    contentEditable(el)
+  );
+}
+
+/** The tristate checked value for a checkable element, or undefined. */
+function checkedState(el: Element, role: string): boolean | "mixed" | undefined {
+  if (el instanceof HTMLInputElement && (el.type === "checkbox" || el.type === "radio"))
+    return el.indeterminate ? "mixed" : el.checked;
+  const aria = tristateAttr(el, "aria-checked");
+  if (aria !== undefined) return aria;
+  return CHECK_DEFAULT_FALSE_ROLES.has(role) ? false : undefined;
+}
+
+/** The expanded value, only when an expand/collapse state is determinable. */
+function expandedState(el: Element): boolean | undefined {
+  const aria = boolAttr(el, "aria-expanded");
+  if (aria !== undefined) return aria;
+  const details =
+    el.localName === "details" ? el : el.localName === "summary" ? el.parentElement : null;
+  if (details instanceof HTMLDetailsElement) return details.open;
+  return undefined;
+}
+
+// propertiesFor follows Chromium's Fill* phase order:
+//   live-region -> global states -> widget properties -> widget states -> relations
 function propertiesFor(options: AXTreeOptions, el: Element, role: string): AXProperty[] {
   const props: AXProperty[] = [];
-  addProp(props, "disabled", "boolean", isDisabled(el));
-  addProp(props, "focusable", "boolean", isFocusable(el));
-  addProp(props, "focused", "boolean", el === el.ownerDocument.activeElement);
-  addProp(
-    props,
-    "readonly",
-    "boolean",
-    ("readOnly" in el && Boolean((el as any).readOnly)) || boolAttr(el, "aria-readonly"),
-  );
-  addProp(
-    props,
-    "required",
-    "boolean",
-    ("required" in el && Boolean((el as any).required)) || boolAttr(el, "aria-required"),
-  );
-  addAriaProp(props, el, role, "aria-busy", "busy", "boolean", ariaBool(el, "aria-busy"));
-  addAriaProp(props, el, role, "aria-invalid", "invalid", "token", ariaToken(el, "aria-invalid"), {
-    includeFalse: true,
-  });
-  addAriaProp(
-    props,
-    el,
-    role,
-    "aria-autocomplete",
-    "autocomplete",
-    "token",
-    ariaToken(el, "aria-autocomplete"),
-  );
-  addAriaProp(
-    props,
-    el,
-    role,
-    "aria-haspopup",
-    "hasPopup",
-    "token",
-    ariaToken(el, "aria-haspopup"),
-    {
+
+  // --- Live region (on the region root) ---
+  const live = liveStatus(el, role);
+  if (live) {
+    addProp(props, "live", "token", live);
+    addProp(props, "atomic", "boolean", boolAttr(el, "aria-atomic") === true, {
       includeFalse: true,
-    },
-  );
+    });
+    addProp(props, "relevant", "tokenList", el.getAttribute("aria-relevant") || "additions text");
+  }
+
+  // --- Global states ---
+  addProp(props, "disabled", "boolean", isDisabled(el));
+  addProp(props, "invalid", "token", invalidToken(el));
+  addProp(props, "focusable", "booleanOrUndefined", isFocusable(el));
+  addProp(props, "focused", "booleanOrUndefined", el === el.ownerDocument.activeElement);
+  addProp(props, "editable", "token", editableToken(el));
+  if (isSettable(el)) addProp(props, "settable", "booleanOrUndefined", true);
+
+  // --- Widget properties ---
+  addProp(props, "autocomplete", "token", ariaToken(el, "aria-autocomplete"));
+  const haspopup = el.getAttribute("aria-haspopup");
+  if (haspopup && haspopup !== "false") addProp(props, "hasPopup", "token", haspopup);
+  addProp(props, "level", "integer", headingLevel(el));
+  if (MULTISELECTABLE_ROLES.has(role))
+    addProp(props, "multiselectable", "boolean", multiselectableState(el), { includeFalse: true });
+  addProp(props, "orientation", "token", ariaToken(el, "aria-orientation"));
+  if (role === "textbox")
+    addProp(
+      props,
+      "multiline",
+      "boolean",
+      el.localName === "textarea" || boolAttr(el, "aria-multiline") === true,
+      { includeFalse: true },
+    );
+  if (READONLY_ROLES.has(role))
+    addProp(props, "readonly", "boolean", readonlyState(el), { includeFalse: true });
+  if (REQUIRED_ROLES.has(role))
+    addProp(props, "required", "boolean", requiredState(el), { includeFalse: true });
+  if (RANGE_ROLES.has(role)) {
+    addProp(props, "valuemin", "number", numberAttr(el, "aria-valuemin") ?? nativeMin(el, role));
+    addProp(props, "valuemax", "number", numberAttr(el, "aria-valuemax") ?? nativeMax(el, role));
+    addProp(props, "valuetext", "string", el.getAttribute("aria-valuetext"));
+  }
+
+  // --- Widget states ---
+  const pressed = tristateAttr(el, "aria-pressed");
+  if (pressed !== undefined) {
+    addProp(props, "pressed", "tristate", tristateValue(pressed), { includeFalse: true });
+  } else {
+    const checked = checkedState(el, role);
+    if (checked !== undefined)
+      addProp(props, "checked", "tristate", tristateValue(checked), { includeFalse: true });
+  }
+  const expanded = expandedState(el);
+  if (expanded !== undefined)
+    addProp(props, "expanded", "booleanOrUndefined", expanded, { includeFalse: true });
+  if (SELECTABLE_ROLES.has(role)) {
+    const selected = el instanceof HTMLOptionElement ? el.selected : boolAttr(el, "aria-selected");
+    if (selected !== undefined)
+      addProp(props, "selected", "booleanOrUndefined", selected, { includeFalse: true });
+  }
   addAriaProp(props, el, role, "aria-modal", "modal", "boolean", ariaBool(el, "aria-modal"));
-  addAriaProp(
-    props,
-    el,
-    role,
-    "aria-multiselectable",
-    "multiselectable",
-    "boolean",
-    ariaBool(el, "aria-multiselectable"),
-  );
-  addAriaProp(
-    props,
-    el,
-    role,
-    "aria-orientation",
-    "orientation",
-    "token",
-    ariaToken(el, "aria-orientation"),
-  );
+
+  // --- Relationships (FillRelationships then FillSparseAttributes order) ---
+  addRelationProp(options, props, el, "aria-describedby", "describedby", "idrefList");
+  addRelationProp(options, props, el, "aria-owns", "owns", "idrefList");
+  addAriaProp(props, el, role, "aria-busy", "busy", "boolean", ariaBool(el, "aria-busy"));
   addAriaProp(
     props,
     el,
@@ -446,53 +673,14 @@ function propertiesFor(options: AXTreeOptions, el: Element, role: string): AXPro
     "string",
     el.getAttribute("aria-roledescription"),
   );
-
-  if (role === "checkbox" || role === "radio" || role === "switch") {
-    const checked =
-      el instanceof HTMLInputElement
-        ? el.indeterminate
-          ? "mixed"
-          : el.checked
-        : tristateAttr(el, "aria-checked");
-    addProp(props, "checked", "tristate", tristateValue(checked), { includeFalse: true });
-  }
-
-  addProp(props, "expanded", "booleanOrUndefined", boolAttr(el, "aria-expanded"), {
-    includeFalse: true,
-  });
-  addProp(props, "pressed", "tristate", tristateValue(tristateAttr(el, "aria-pressed")), {
-    includeFalse: true,
-  });
-  addProp(
-    props,
-    "selected",
-    "booleanOrUndefined",
-    (el instanceof HTMLOptionElement ? el.selected : undefined) ?? boolAttr(el, "aria-selected"),
-    { includeFalse: true },
-  );
-  if (role === "heading") addProp(props, "level", "integer", headingLevel(el));
-  if (role === "textbox")
-    addProp(
-      props,
-      "multiline",
-      "boolean",
-      el.localName === "textarea" || boolAttr(el, "aria-multiline"),
-    );
-  const min = numberAttr(el, "aria-valuemin") ?? nativeMin(el, role);
-  const max = numberAttr(el, "aria-valuemax") ?? nativeMax(el, role);
-  addProp(props, "valuemin", "number", min);
-  addProp(props, "valuemax", "number", max);
-  addProp(props, "valuetext", "string", el.getAttribute("aria-valuetext"));
   addRelationProp(options, props, el, "aria-activedescendant", "activedescendant", "idref", {
     omitValue: true,
   });
-  addRelationProp(options, props, el, "aria-controls", "controls", "idrefList");
-  addRelationProp(options, props, el, "aria-describedby", "describedby", "idrefList");
-  addRelationProp(options, props, el, "aria-details", "details", "idrefList");
   addRelationProp(options, props, el, "aria-errormessage", "errormessage", "idrefList");
+  addRelationProp(options, props, el, "aria-controls", "controls", "idrefList");
+  addRelationProp(options, props, el, "aria-details", "details", "idrefList");
   addRelationProp(options, props, el, "aria-flowto", "flowto", "idrefList");
   addRelationProp(options, props, el, "aria-labelledby", "labelledby", "nodeList");
-  addRelationProp(options, props, el, "aria-owns", "owns", "idrefList");
   if (role === "link" && el instanceof HTMLAnchorElement) addProp(props, "url", "string", el.href);
   return props;
 }
@@ -540,21 +728,19 @@ function buildListMarkerAX(options: AXTreeOptions, el: Element, out: AXNode[]): 
   out.push({
     nodeId: textId,
     ignored: false,
-    role: ax("role", "StaticText"),
+    role: roleNameValue("StaticText"),
     name: ax("computedString", marker),
     parentId: markerId,
     backendDOMNodeId: options.registry.backendIdFor(el),
     childIds: [],
-    frameId: options.frameId,
   });
   out.push({
     nodeId: markerId,
     ignored: false,
-    role: ax("role", "ListMarker"),
+    role: roleNameValue("ListMarker"),
     name: ax("computedString", marker),
     backendDOMNodeId: options.registry.backendIdFor(el),
     childIds: [textId],
-    frameId: options.frameId,
   });
   return [markerId];
 }
@@ -564,6 +750,8 @@ function buildAX(
   node: Node,
   parentId: string | undefined,
   out: AXNode[],
+  inheritedIgnore?: AXProperty,
+  depthLeft: number = Number.POSITIVE_INFINITY,
 ): string[] {
   if (isText(node)) {
     const text = textValue(node);
@@ -571,13 +759,13 @@ function buildAX(
     const nodeId = axIdFor(node);
     out.push({
       nodeId,
-      ignored: false,
-      role: ax("role", "StaticText"),
+      ignored: Boolean(inheritedIgnore),
+      ...(inheritedIgnore ? { ignoredReasons: [inheritedIgnore] } : {}),
+      role: roleNameValue("StaticText"),
       name: ax("computedString", text),
       parentId,
       backendDOMNodeId: options.registry.backendIdFor(node.parentElement || node),
       childIds: [],
-      frameId: options.frameId,
     });
     return [nodeId];
   }
@@ -587,43 +775,88 @@ function buildAX(
     const root: AXNode = {
       nodeId,
       ignored: false,
-      role: ax("role", "RootWebArea"),
-      name: ax("computedString", options.document.title || options.document.location.href),
-      backendDOMNodeId: options.registry.backendIdFor(options.document.documentElement),
+      role: roleNameValue("RootWebArea"),
+      // Chromium's RootWebArea name is the document title (empty when untitled);
+      // its backend node is the Document, and frameId appears only here (the root).
+      name: ax("computedString", options.document.title || ""),
+      backendDOMNodeId: options.registry.backendIdFor(options.document),
       childIds: [],
       frameId: options.frameId,
     };
     out.push(root);
-    root.childIds = buildAX(options, options.document.documentElement, nodeId, out);
+    root.childIds = buildAX(
+      options,
+      options.document.documentElement,
+      nodeId,
+      out,
+      undefined,
+      depthLeft,
+    );
     return [nodeId];
   }
 
   if (!isElement(node)) return [];
   const reasonIgnored = ignoredReasonFor(node);
   if (reasonIgnored) {
-    const role = roleOf(node);
     const nodeId = axIdFor(node);
+    // Recurse into still-rendered-but-ignored subtrees (aria-hidden / inert) so
+    // their descendants stay discoverable, mirroring Chromium's "ignored but
+    // included in tree" model. Descendants inherit the subtree-variant reason.
+    const children =
+      RENDERED_IGNORED_REASONS.has(reasonIgnored.name) && depthLeft > 0
+        ? composedChildren(node).flatMap((child) =>
+            buildAX(
+              options,
+              child,
+              undefined,
+              out,
+              subtreeReason(reasonIgnored.name),
+              depthLeft - 1,
+            ),
+          )
+        : [];
+    // Chromium serializes ignored nodes with role:none and no name on the
+    // getFullAXTree path; only the queryAXTree force_name_and_role path keeps the
+    // element's real role + name.
+    const forced = options.forceNameAndRole ? roleOf(node) : null;
     out.push({
       nodeId,
       ignored: true,
       ignoredReasons: [reasonIgnored],
-      role: role ? ax("role", role) : undefined,
-      name: ax(
-        "computedString",
-        role ? accessibleNameFor(node, role) : computeAccessibleName(node),
-      ),
+      role: options.forceNameAndRole
+        ? forced
+          ? ax("role", forced)
+          : undefined
+        : ax("role", "none"),
+      ...(options.forceNameAndRole
+        ? {
+            name: ax(
+              "computedString",
+              forced ? accessibleNameFor(node, forced) : computeAccessibleName(node),
+            ),
+          }
+        : {}),
+      parentId,
       backendDOMNodeId: options.registry.backendIdFor(node),
-      childIds: [],
-      frameId: options.frameId,
+      childIds: children,
     });
+    for (const childId of children) {
+      const child = out.find((item) => item.nodeId === childId);
+      if (child) child.parentId = nodeId;
+    }
     return [nodeId];
   }
 
   const role = roleOf(node);
-  const children = [
-    ...buildListMarkerAX(options, node, out),
-    ...composedChildren(node).flatMap((child) => buildAX(options, child, undefined, out)),
-  ];
+  const children =
+    depthLeft <= 0
+      ? []
+      : [
+          ...buildListMarkerAX(options, node, out),
+          ...composedChildren(node).flatMap((child) =>
+            buildAX(options, child, undefined, out, undefined, depthLeft - 1),
+          ),
+        ];
   if (!role && !computeAccessibleName(node).trim()) return children;
 
   const nodeId = axIdFor(node);
@@ -632,15 +865,14 @@ function buildAX(
   const axNode: AXNode = {
     nodeId,
     ignored: false,
-    role: ax("role", role || "generic"),
+    role: roleNameValue(role || "generic"),
     name: ax("computedString", name),
     description: description ? ax("computedString", description) : undefined,
-    value: role ? valueFor(node) : undefined,
+    value: role ? valueFor(node, role) : undefined,
     properties: role ? propertiesFor(options, node, role) : undefined,
     parentId,
     backendDOMNodeId: options.registry.backendIdFor(node),
     childIds: children,
-    frameId: options.frameId,
   };
   for (const childId of children) {
     const child = out.find((item) => item.nodeId === childId);
@@ -652,14 +884,128 @@ function buildAX(
 
 export function getFullAXTree(
   options: AXTreeOptions,
+  depth?: number,
 ): Protocol.Accessibility.GetFullAXTreeResponse {
   const nodes: AXNode[] = [];
-  buildAX(options, options.document, undefined, nodes);
+  buildAX(
+    options,
+    options.document,
+    undefined,
+    nodes,
+    undefined,
+    depth && depth > 0 ? depth : undefined,
+  );
   return { nodes };
 }
 
+/** Resolve a DOM backend-node id to its emitted AX node, if one exists. */
+function axNodeForBackendId(
+  options: AXTreeOptions,
+  nodes: AXNode[],
+  backendId: Protocol.DOM.BackendNodeId,
+): AXNode | undefined {
+  const dom = options.registry.nodeForBackendId(backendId);
+  if (!dom) return undefined;
+  const axId = nodeToAXId.get(dom);
+  return axId ? nodes.find((node) => node.nodeId === axId) : undefined;
+}
+
+function ancestorChain(byId: Map<string, AXNode>, start: AXNode | undefined): AXNode[] {
+  const chain: AXNode[] = [];
+  for (let cur = start; cur; cur = cur.parentId ? byId.get(cur.parentId) : undefined)
+    chain.push(cur);
+  return chain;
+}
+
+/**
+ * Fetch the AX node for a DOM node plus its ancestors and (by default) its
+ * immediate relatives. With no target, returns the whole tree (back-compat).
+ */
 export function getPartialAXTree(
   options: AXTreeOptions,
+  target?: Protocol.DOM.BackendNodeId,
+  fetchRelatives = true,
 ): Protocol.Accessibility.GetPartialAXTreeResponse {
-  return getFullAXTree(options);
+  const { nodes } = getFullAXTree(options);
+  if (target == null) return { nodes };
+  const byId = new Map(nodes.map((node) => [node.nodeId, node]));
+  const start = axNodeForBackendId(options, nodes, target);
+  if (!start) return { nodes: [] };
+  const picked = new Map<string, AXNode>(
+    ancestorChain(byId, start).map((node) => [node.nodeId, node]),
+  );
+  if (fetchRelatives) {
+    const parent = start.parentId ? byId.get(start.parentId) : undefined;
+    for (const id of [...(parent?.childIds ?? []), ...(start.childIds ?? [])]) {
+      const relative = byId.get(id);
+      if (relative) picked.set(relative.nodeId, relative);
+    }
+  }
+  return { nodes: [...picked.values()] };
+}
+
+/** The root (RootWebArea) AX node of the document. */
+export function getRootAXNode(
+  options: AXTreeOptions,
+): Protocol.Accessibility.GetRootAXNodeResponse {
+  const { nodes } = getFullAXTree(options);
+  const root = nodes.find((node) => !node.parentId);
+  if (!root) throw new Error("no root AX node");
+  return { node: root };
+}
+
+/** The direct children of the AX node with the given AX id. */
+export function getChildAXNodes(
+  options: AXTreeOptions,
+  id: string,
+): Protocol.Accessibility.GetChildAXNodesResponse {
+  const { nodes } = getFullAXTree(options);
+  const parent = nodes.find((node) => node.nodeId === id);
+  if (!parent) return { nodes: [] };
+  const childIds = new Set(parent.childIds ?? []);
+  return { nodes: nodes.filter((node) => childIds.has(node.nodeId)) };
+}
+
+/** The AX node for a DOM node together with every ancestor up to the root. */
+export function getAXNodeAndAncestors(
+  options: AXTreeOptions,
+  target: Protocol.DOM.BackendNodeId,
+): Protocol.Accessibility.GetAXNodeAndAncestorsResponse {
+  const { nodes } = getFullAXTree(options);
+  const byId = new Map(nodes.map((node) => [node.nodeId, node]));
+  return { nodes: ancestorChain(byId, axNodeForBackendId(options, nodes, target)) };
+}
+
+/** All AX nodes in a subtree matching the given accessible name and/or role. */
+export function queryAXTree(
+  options: AXTreeOptions,
+  query: { target?: Protocol.DOM.BackendNodeId; accessibleName?: string; role?: string },
+): Protocol.Accessibility.QueryAXTreeResponse {
+  // Chromium's queryAXTree forces real role + name even on ignored nodes, so
+  // hidden elements remain findable by role/name.
+  const { nodes } = getFullAXTree({ ...options, forceNameAndRole: true });
+  const byId = new Map(nodes.map((node) => [node.nodeId, node]));
+  const root =
+    query.target == null
+      ? nodes.find((node) => !node.parentId)
+      : axNodeForBackendId(options, nodes, query.target);
+  if (!root) return { nodes: [] };
+  const subtree: AXNode[] = [];
+  const stack: AXNode[] = [root];
+  while (stack.length) {
+    const node = stack.pop();
+    if (!node) continue;
+    subtree.push(node);
+    for (const childId of node.childIds ?? []) {
+      const child = byId.get(childId);
+      if (child) stack.push(child);
+    }
+  }
+  return {
+    nodes: subtree.filter((node) => {
+      if (query.role != null && node.role?.value !== query.role) return false;
+      if (query.accessibleName != null && node.name?.value !== query.accessibleName) return false;
+      return true;
+    }),
+  };
 }
