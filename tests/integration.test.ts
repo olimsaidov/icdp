@@ -1,8 +1,8 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
 import { type FrameElementLike, IcdpHost, type WindowLike } from "../src/host/index.ts";
 import type { CdpMessage } from "../src/protocol.ts";
-import { serveRelay } from "../src/relay/bun.ts";
+import { type RelayServer, serveRelay } from "../src/relay/node.ts";
 
 const FRAME_ORIGIN = "http://app.test";
 
@@ -66,7 +66,11 @@ class TestClient {
     });
   }
 
-  async send(method: string, params: Record<string, unknown> = {}, sessionId?: string): Promise<CdpMessage> {
+  async send(
+    method: string,
+    params: Record<string, unknown> = {},
+    sessionId?: string,
+  ): Promise<CdpMessage> {
     await this.opened;
     const id = this.nextId++;
     const response = new Promise<CdpMessage>((resolve) => this.pending.set(id, resolve));
@@ -80,14 +84,19 @@ class TestClient {
 }
 
 describe("relay + host + frame, end to end", () => {
-  const relay = serveRelay({ product: "icdp-e2e" });
+  let relay: RelayServer;
   const { win, emit } = fakeWindow();
   const host = new IcdpHost(win);
   const frame = fakeIframe();
-  const cleanups: Array<() => void> = [() => relay.stop(), () => host.destroy()];
+  const cleanups: Array<() => unknown> = [() => host.destroy()];
 
-  afterAll(() => {
-    for (const cleanup of cleanups.reverse()) cleanup();
+  beforeAll(async () => {
+    relay = await serveRelay({ product: "icdp-e2e" });
+    cleanups.push(() => relay.stop());
+  });
+
+  afterAll(async () => {
+    for (const cleanup of cleanups.reverse()) await cleanup();
   });
 
   test("full command round-trip from a WebSocket client to the frame", async () => {
@@ -97,7 +106,9 @@ describe("relay + host + frame, end to end", () => {
       origin: FRAME_ORIGIN,
       source: frame.contentWindow,
     });
-    const welcome = frame.posted.find((post) => (post.message as { icdp?: string }).icdp === "welcome");
+    const welcome = frame.posted.find(
+      (post) => (post.message as { icdp?: string }).icdp === "welcome",
+    );
     if (!welcome) throw new Error("no welcome posted");
     const framePort = welcome.transfer[0] as MessagePort;
     framePort.onmessage = (event) => {
@@ -111,7 +122,10 @@ describe("relay + host + frame, end to end", () => {
 
     const disconnect = host.connectRelay({ url: relay.hostWsUrl });
     cleanups.push(disconnect);
-    await until(() => relay.core.status().hostConnected && relay.core.status().targets.length === 1, "host uplink");
+    await until(
+      () => relay.core.status().hostConnected && relay.core.status().targets.length === 1,
+      "host uplink",
+    );
 
     const client = new TestClient(relay.browserWsUrl);
     cleanups.push(() => client.close());
@@ -120,11 +134,16 @@ describe("relay + host + frame, end to end", () => {
     expect((version.result as { product: string }).product).toBe("icdp-e2e");
 
     const targets = await client.send("Target.getTargets");
-    const targetInfos = (targets.result as { targetInfos: Array<{ targetId: string; url: string }> }).targetInfos;
+    const targetInfos = (
+      targets.result as { targetInfos: Array<{ targetId: string; url: string }> }
+    ).targetInfos;
     expect(targetInfos).toHaveLength(1);
     expect(targetInfos[0]?.targetId).toBe("preview");
 
-    const attached = await client.send("Target.attachToTarget", { targetId: "preview", flatten: true });
+    const attached = await client.send("Target.attachToTarget", {
+      targetId: "preview",
+      flatten: true,
+    });
     const sessionId = (attached.result as { sessionId: string }).sessionId;
     expect(sessionId).toMatch(/^icdp-session-/);
 
@@ -133,8 +152,13 @@ describe("relay + host + frame, end to end", () => {
     expect(document.sessionId).toBe(sessionId);
 
     // Frame events reach the client tagged with its sessionId.
-    framePort.postMessage(JSON.stringify({ method: "Runtime.consoleAPICalled", params: { type: "log" } }));
-    await until(() => client.events.some((event) => event.method === "Runtime.consoleAPICalled"), "console event");
+    framePort.postMessage(
+      JSON.stringify({ method: "Runtime.consoleAPICalled", params: { type: "log" } }),
+    );
+    await until(
+      () => client.events.some((event) => event.method === "Runtime.consoleAPICalled"),
+      "console event",
+    );
     const consoleEvent = client.events.find((event) => event.method === "Runtime.consoleAPICalled");
     expect(consoleEvent?.sessionId).toBe(sessionId);
 
@@ -144,14 +168,14 @@ describe("relay + host + frame, end to end", () => {
   });
 
   test("HTTP discovery endpoints describe the browser endpoint", async () => {
-    const version = (await (await fetch(`http://127.0.0.1:${relay.server.port}/json/version`)).json()) as {
+    const version = (await (await fetch(`http://127.0.0.1:${relay.port}/json/version`)).json()) as {
       webSocketDebuggerUrl: string;
       Browser: string;
     };
     expect(version.Browser).toBe("icdp-e2e");
     expect(version.webSocketDebuggerUrl).toBe(relay.browserWsUrl);
 
-    const list = (await (await fetch(`http://127.0.0.1:${relay.server.port}/json/list`)).json()) as Array<{
+    const list = (await (await fetch(`http://127.0.0.1:${relay.port}/json/list`)).json()) as Array<{
       id: string;
       webSocketDebuggerUrl: string;
     }>;

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 
 import type { CdpMessage, HostToRelayMessage, RelayToHostMessage } from "../src/protocol.ts";
 import { RelayCore, type SocketLike } from "../src/relay/core.ts";
@@ -53,7 +53,10 @@ function lastResponse(client: FakeSocket): CdpMessage {
 }
 
 function attach(core: RelayCore, client: FakeSocket, targetId = "preview"): string {
-  core.clientMessage(client, JSON.stringify({ id: 1, method: "Target.attachToTarget", params: { targetId } }));
+  core.clientMessage(
+    client,
+    JSON.stringify({ id: 1, method: "Target.attachToTarget", params: { targetId } }),
+  );
   const response = lastResponse(client);
   return (response.result as { sessionId: string }).sessionId;
 }
@@ -70,7 +73,8 @@ describe("browser-level methods", () => {
   test("Target.getTargets lists the host's targets", () => {
     const { core, client } = setup();
     core.clientMessage(client, JSON.stringify({ id: 1, method: "Target.getTargets" }));
-    const infos = (lastResponse(client).result as { targetInfos: Array<{ targetId: string }> }).targetInfos;
+    const infos = (lastResponse(client).result as { targetInfos: Array<{ targetId: string }> })
+      .targetInfos;
     expect(infos.map((info) => info.targetId)).toEqual(["preview"]);
   });
 
@@ -112,7 +116,10 @@ describe("session routing", () => {
     const { core, host, client } = setup();
     const sessionId = attach(core, client);
 
-    core.clientMessage(client, JSON.stringify({ id: 42, sessionId, method: "DOM.getDocument", params: { depth: 1 } }));
+    core.clientMessage(
+      client,
+      JSON.stringify({ id: 42, sessionId, method: "DOM.getDocument", params: { depth: 1 } }),
+    );
     const command = hostSent(host).at(-1);
     if (command?.kind !== "command") throw new Error("expected a bridge command");
     expect(command.targetId).toBe("preview");
@@ -160,7 +167,10 @@ describe("session routing", () => {
 
   test("command with unknown sessionId errors", () => {
     const { core, client } = setup();
-    core.clientMessage(client, JSON.stringify({ id: 5, sessionId: "bogus", method: "DOM.getDocument" }));
+    core.clientMessage(
+      client,
+      JSON.stringify({ id: 5, sessionId: "bogus", method: "DOM.getDocument" }),
+    );
     expect(lastResponse(client).error?.message).toContain("Session not found");
   });
 
@@ -203,7 +213,9 @@ describe("host lifecycle", () => {
         targets: [{ targetId: "preview", title: "Preview", url: "http://app.test/" }],
       } satisfies HostToRelayMessage),
     );
-    expect(client.sent.filter((message) => message.method === "Target.targetCreated").length).toBeGreaterThanOrEqual(2);
+    expect(
+      client.sent.filter((message) => message.method === "Target.targetCreated").length,
+    ).toBeGreaterThanOrEqual(2);
   });
 
   test("host disconnect fails in-flight commands", () => {
@@ -218,9 +230,15 @@ describe("host lifecycle", () => {
     const { core, host, client } = setup();
     core.clientMessage(
       client,
-      JSON.stringify({ id: 1, method: "Target.setAutoAttach", params: { autoAttach: true, flatten: true } }),
+      JSON.stringify({
+        id: 1,
+        method: "Target.setAutoAttach",
+        params: { autoAttach: true, flatten: true },
+      }),
     );
-    expect(client.sent.filter((message) => message.method === "Target.attachedToTarget").length).toBe(1);
+    expect(
+      client.sent.filter((message) => message.method === "Target.attachedToTarget").length,
+    ).toBe(1);
 
     core.hostMessage(
       host,
@@ -229,6 +247,8 @@ describe("host lifecycle", () => {
         target: { targetId: "second", title: "Second", url: "http://app.test/2" },
       } satisfies HostToRelayMessage),
     );
-    expect(client.sent.filter((message) => message.method === "Target.attachedToTarget").length).toBe(2);
+    expect(
+      client.sent.filter((message) => message.method === "Target.attachedToTarget").length,
+    ).toBe(2);
   });
 });

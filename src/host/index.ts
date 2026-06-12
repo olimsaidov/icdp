@@ -14,7 +14,9 @@ import {
 
 /** Minimal structural view of an iframe, so tests can fake it. */
 export type FrameElementLike = {
-  contentWindow: { postMessage: (message: unknown, targetOrigin: string, transfer?: Transferable[]) => void } | null;
+  contentWindow: {
+    postMessage: (message: unknown, targetOrigin: string, transfer?: Transferable[]) => void;
+  } | null;
   addEventListener: (type: "load", listener: () => void) => void;
   removeEventListener: (type: "load", listener: () => void) => void;
 };
@@ -144,7 +146,10 @@ export class IcdpHost {
   attach(targetId: string): LocalSession {
     const pairing = this.pairings.get(targetId);
     if (!pairing) throw new Error(`Unknown target "${targetId}"`);
-    const state: LocalSessionState = { key: `local-${this.nextLocalSession++}`, listeners: new Set() };
+    const state: LocalSessionState = {
+      key: `local-${this.nextLocalSession++}`,
+      listeners: new Set(),
+    };
     pairing.localSessions.set(state.key, state);
 
     return {
@@ -203,7 +208,8 @@ export class IcdpHost {
   private handleWindowMessage(event: MessageEvent): void {
     if (!isHandshakeMessage(event.data) || event.data.icdp !== "hello") return;
     const pairing = Array.from(this.pairings.values()).find(
-      (candidate) => candidate.iframe.contentWindow !== null && candidate.iframe.contentWindow === event.source,
+      (candidate) =>
+        candidate.iframe.contentWindow !== null && candidate.iframe.contentWindow === event.source,
     );
     if (!pairing) return;
     if (pairing.origins !== "*" && !pairing.origins.includes(event.origin)) return;
@@ -218,7 +224,8 @@ export class IcdpHost {
     pairing.connected = true;
     pairing.info = { title: event.data.title, url: event.data.url };
     pairing.enables.clear();
-    channel.port1.onmessage = (portEvent) => this.handleFrameMessage(pairing, String(portEvent.data));
+    channel.port1.onmessage = (portEvent) =>
+      this.handleFrameMessage(pairing, String(portEvent.data));
     pairing.iframe.contentWindow?.postMessage(
       { icdp: "welcome", v: PROTOCOL_VERSION } satisfies WelcomeMessage,
       event.origin === "null" ? "*" : event.origin,
@@ -316,7 +323,9 @@ export class IcdpHost {
       if (holders.size === 0 && pairing.port) {
         const commandId = pairing.nextCommandId++;
         pairing.pending.set(commandId, { consumerKey, settle: () => {} });
-        pairing.port.postMessage(JSON.stringify({ id: commandId, method: `${domain}.disable`, params: {} }));
+        pairing.port.postMessage(
+          JSON.stringify({ id: commandId, method: `${domain}.disable`, params: {} }),
+        );
       }
     }
   }
@@ -406,7 +415,8 @@ class RelayUplink {
 
   handleTargetEvent(event: TargetEvent): void {
     if (event.kind === "targetCreated") this.send({ kind: "targetCreated", target: event.target });
-    else if (event.kind === "targetDestroyed") this.send({ kind: "targetDestroyed", targetId: event.targetId });
+    else if (event.kind === "targetDestroyed")
+      this.send({ kind: "targetDestroyed", targetId: event.targetId });
     else this.send({ kind: "targetInfoChanged", target: event.target });
   }
 }

@@ -1,7 +1,12 @@
 import type { ARIAProperty } from "aria-query";
 import { roles as ariaRoles } from "aria-query";
 import type Protocol from "devtools-protocol";
-import { computeAccessibleDescription, computeAccessibleName, getRole, isInaccessible } from "dom-accessibility-api";
+import {
+  computeAccessibleDescription,
+  computeAccessibleName,
+  getRole,
+  isInaccessible,
+} from "dom-accessibility-api";
 
 type AXValue = Protocol.Accessibility.AXValue;
 type AXProperty = Protocol.Accessibility.AXProperty;
@@ -135,11 +140,13 @@ function ignoredReasonFor(el: Element): AXProperty | undefined {
   if (el.hasAttribute("inert")) return ignoredReason("inertElement");
   if (el.getAttribute("aria-hidden") === "true") return ignoredReason("ariaHiddenElement");
   if (style.display === "none") return ignoredReason("notRendered");
-  if (style.visibility === "hidden" || style.visibility === "collapse") return ignoredReason("notVisible");
+  if (style.visibility === "hidden" || style.visibility === "collapse")
+    return ignoredReason("notVisible");
 
   for (let parent = el.parentElement; parent; parent = parent.parentElement) {
     const parentStyle = getComputedStyle(parent);
-    if ((parent as HTMLElement).hidden || parentStyle.display === "none") return ignoredReason("hiddenRoot");
+    if ((parent as HTMLElement).hidden || parentStyle.display === "none")
+      return ignoredReason("hiddenRoot");
     if (parent.hasAttribute("inert")) return ignoredReason("inertSubtree");
     if (parent.getAttribute("aria-hidden") === "true") return ignoredReason("ariaHiddenSubtree");
   }
@@ -163,7 +170,9 @@ function tristateAttr(el: Element, name: string): boolean | "mixed" | undefined 
   return undefined;
 }
 
-function tristateValue(value: boolean | "mixed" | undefined): "true" | "false" | "mixed" | undefined {
+function tristateValue(
+  value: boolean | "mixed" | undefined,
+): "true" | "false" | "mixed" | undefined {
   if (value === undefined) return undefined;
   if (value === "mixed") return "mixed";
   return value ? "true" : "false";
@@ -180,12 +189,19 @@ function addProp(
   value: unknown,
   options: { includeFalse?: boolean } = {},
 ): void {
-  if (value !== undefined && value !== null && value !== "" && (options.includeFalse || value !== false))
+  if (
+    value !== undefined &&
+    value !== null &&
+    value !== "" &&
+    (options.includeFalse || value !== false)
+  )
     props.push({ name, value: ax(type, value) });
 }
 
 function isDisabled(el: Element): boolean {
-  return boolAttr(el, "aria-disabled") === true || ("disabled" in el && Boolean((el as any).disabled));
+  return (
+    boolAttr(el, "aria-disabled") === true || ("disabled" in el && Boolean((el as any).disabled))
+  );
 }
 
 function isFocusable(el: Element): boolean {
@@ -234,15 +250,21 @@ function nativeMax(el: Element, role: string): number | undefined {
 
 function valueFor(el: Element): AXValue | undefined {
   const override = (el as any).__agentAX?.value;
-  if (override !== undefined) return ax(typeof override === "number" ? "number" : "string", override);
+  if (override !== undefined)
+    return ax(typeof override === "number" ? "number" : "string", override);
   if (el instanceof HTMLInputElement && (el.type === "range" || el.type === "number")) {
     const number = Number(el.value);
     return Number.isFinite(number) ? ax("number", number) : ax("string", el.value);
   }
-  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
+  if (
+    el instanceof HTMLInputElement ||
+    el instanceof HTMLTextAreaElement ||
+    el instanceof HTMLSelectElement
+  ) {
     return ax("string", el.value);
   }
-  if (el instanceof HTMLProgressElement || el instanceof HTMLMeterElement) return ax("number", el.value);
+  if (el instanceof HTMLProgressElement || el instanceof HTMLMeterElement)
+    return ax("number", el.value);
   const now = el.getAttribute("aria-valuenow");
   if (now == null) return undefined;
   const number = Number(now);
@@ -265,7 +287,11 @@ function idRefs(el: Element, name: string): string[] {
   return (el.getAttribute(name) || "").trim().split(/\s+/).filter(Boolean);
 }
 
-function relatedNodesFor(options: AXTreeOptions, el: Element, ids: string[]): Protocol.Accessibility.AXRelatedNode[] {
+function relatedNodesFor(
+  options: AXTreeOptions,
+  el: Element,
+  ids: string[],
+): Protocol.Accessibility.AXRelatedNode[] {
   return ids.flatMap((idref) => {
     const related = el.ownerDocument.getElementById(idref);
     if (!related) return [];
@@ -273,17 +299,32 @@ function relatedNodesFor(options: AXTreeOptions, el: Element, ids: string[]): Pr
       {
         backendDOMNodeId: options.registry.backendIdFor(related),
         idref,
-        text: computeAccessibleName(related) || related.textContent?.replace(/\s+/g, " ").trim() || undefined,
+        text:
+          computeAccessibleName(related) ||
+          related.textContent?.replace(/\s+/g, " ").trim() ||
+          undefined,
       },
     ];
   });
 }
 
-const authorNamedStructuralRoles = new Set(["list", "listitem", "main", "paragraph", "row", "rowgroup", "table"]);
+const authorNamedStructuralRoles = new Set([
+  "list",
+  "listitem",
+  "main",
+  "paragraph",
+  "row",
+  "rowgroup",
+  "table",
+]);
 
 function accessibleNameFor(el: Element, role: string): string {
   if (!authorNamedStructuralRoles.has(role)) return computeAccessibleName(el);
-  if (el.hasAttribute("aria-label") || el.hasAttribute("aria-labelledby") || el.hasAttribute("title"))
+  if (
+    el.hasAttribute("aria-label") ||
+    el.hasAttribute("aria-labelledby") ||
+    el.hasAttribute("title")
+  )
     return computeAccessibleName(el);
   return "";
 }
@@ -347,10 +388,27 @@ function propertiesFor(options: AXTreeOptions, el: Element, role: string): AXPro
   addAriaProp(props, el, role, "aria-invalid", "invalid", "token", ariaToken(el, "aria-invalid"), {
     includeFalse: true,
   });
-  addAriaProp(props, el, role, "aria-autocomplete", "autocomplete", "token", ariaToken(el, "aria-autocomplete"));
-  addAriaProp(props, el, role, "aria-haspopup", "hasPopup", "token", ariaToken(el, "aria-haspopup"), {
-    includeFalse: true,
-  });
+  addAriaProp(
+    props,
+    el,
+    role,
+    "aria-autocomplete",
+    "autocomplete",
+    "token",
+    ariaToken(el, "aria-autocomplete"),
+  );
+  addAriaProp(
+    props,
+    el,
+    role,
+    "aria-haspopup",
+    "hasPopup",
+    "token",
+    ariaToken(el, "aria-haspopup"),
+    {
+      includeFalse: true,
+    },
+  );
   addAriaProp(props, el, role, "aria-modal", "modal", "boolean", ariaBool(el, "aria-modal"));
   addAriaProp(
     props,
@@ -361,8 +419,24 @@ function propertiesFor(options: AXTreeOptions, el: Element, role: string): AXPro
     "boolean",
     ariaBool(el, "aria-multiselectable"),
   );
-  addAriaProp(props, el, role, "aria-orientation", "orientation", "token", ariaToken(el, "aria-orientation"));
-  addAriaProp(props, el, role, "aria-keyshortcuts", "keyshortcuts", "string", el.getAttribute("aria-keyshortcuts"));
+  addAriaProp(
+    props,
+    el,
+    role,
+    "aria-orientation",
+    "orientation",
+    "token",
+    ariaToken(el, "aria-orientation"),
+  );
+  addAriaProp(
+    props,
+    el,
+    role,
+    "aria-keyshortcuts",
+    "keyshortcuts",
+    "string",
+    el.getAttribute("aria-keyshortcuts"),
+  );
   addAriaProp(
     props,
     el,
@@ -375,12 +449,20 @@ function propertiesFor(options: AXTreeOptions, el: Element, role: string): AXPro
 
   if (role === "checkbox" || role === "radio" || role === "switch") {
     const checked =
-      el instanceof HTMLInputElement ? (el.indeterminate ? "mixed" : el.checked) : tristateAttr(el, "aria-checked");
+      el instanceof HTMLInputElement
+        ? el.indeterminate
+          ? "mixed"
+          : el.checked
+        : tristateAttr(el, "aria-checked");
     addProp(props, "checked", "tristate", tristateValue(checked), { includeFalse: true });
   }
 
-  addProp(props, "expanded", "booleanOrUndefined", boolAttr(el, "aria-expanded"), { includeFalse: true });
-  addProp(props, "pressed", "tristate", tristateValue(tristateAttr(el, "aria-pressed")), { includeFalse: true });
+  addProp(props, "expanded", "booleanOrUndefined", boolAttr(el, "aria-expanded"), {
+    includeFalse: true,
+  });
+  addProp(props, "pressed", "tristate", tristateValue(tristateAttr(el, "aria-pressed")), {
+    includeFalse: true,
+  });
   addProp(
     props,
     "selected",
@@ -390,13 +472,20 @@ function propertiesFor(options: AXTreeOptions, el: Element, role: string): AXPro
   );
   if (role === "heading") addProp(props, "level", "integer", headingLevel(el));
   if (role === "textbox")
-    addProp(props, "multiline", "boolean", el.localName === "textarea" || boolAttr(el, "aria-multiline"));
+    addProp(
+      props,
+      "multiline",
+      "boolean",
+      el.localName === "textarea" || boolAttr(el, "aria-multiline"),
+    );
   const min = numberAttr(el, "aria-valuemin") ?? nativeMin(el, role);
   const max = numberAttr(el, "aria-valuemax") ?? nativeMax(el, role);
   addProp(props, "valuemin", "number", min);
   addProp(props, "valuemax", "number", max);
   addProp(props, "valuetext", "string", el.getAttribute("aria-valuetext"));
-  addRelationProp(options, props, el, "aria-activedescendant", "activedescendant", "idref", { omitValue: true });
+  addRelationProp(options, props, el, "aria-activedescendant", "activedescendant", "idref", {
+    omitValue: true,
+  });
   addRelationProp(options, props, el, "aria-controls", "controls", "idrefList");
   addRelationProp(options, props, el, "aria-describedby", "describedby", "idrefList");
   addRelationProp(options, props, el, "aria-details", "details", "idrefList");
@@ -419,7 +508,8 @@ function composedChildren(node: Node): Node[] {
     if (node.localName === "table") {
       const children = Array.from(node.childNodes);
       const sections = new Set(["thead", "tbody", "tfoot"]);
-      const section = (name: string) => children.filter((child) => isElement(child) && child.localName === name);
+      const section = (name: string) =>
+        children.filter((child) => isElement(child) && child.localName === name);
       return [
         ...children.filter((child) => !isElement(child) || !sections.has(child.localName)),
         ...section("thead"),
@@ -469,7 +559,12 @@ function buildListMarkerAX(options: AXTreeOptions, el: Element, out: AXNode[]): 
   return [markerId];
 }
 
-function buildAX(options: AXTreeOptions, node: Node, parentId: string | undefined, out: AXNode[]): string[] {
+function buildAX(
+  options: AXTreeOptions,
+  node: Node,
+  parentId: string | undefined,
+  out: AXNode[],
+): string[] {
   if (isText(node)) {
     const text = textValue(node);
     if (!text) return [];
@@ -513,7 +608,10 @@ function buildAX(options: AXTreeOptions, node: Node, parentId: string | undefine
       ignored: true,
       ignoredReasons: [ignoredReason],
       role: role ? ax("role", role) : undefined,
-      name: ax("computedString", role ? accessibleNameFor(node, role) : computeAccessibleName(node)),
+      name: ax(
+        "computedString",
+        role ? accessibleNameFor(node, role) : computeAccessibleName(node),
+      ),
       backendDOMNodeId: options.registry.backendIdFor(node),
       childIds: [],
       frameId: options.frameId,
@@ -552,12 +650,16 @@ function buildAX(options: AXTreeOptions, node: Node, parentId: string | undefine
   return [nodeId];
 }
 
-export function getFullAXTree(options: AXTreeOptions): Protocol.Accessibility.GetFullAXTreeResponse {
+export function getFullAXTree(
+  options: AXTreeOptions,
+): Protocol.Accessibility.GetFullAXTreeResponse {
   const nodes: AXNode[] = [];
   buildAX(options, options.document, undefined, nodes);
   return { nodes };
 }
 
-export function getPartialAXTree(options: AXTreeOptions): Protocol.Accessibility.GetPartialAXTreeResponse {
+export function getPartialAXTree(
+  options: AXTreeOptions,
+): Protocol.Accessibility.GetPartialAXTreeResponse {
   return getFullAXTree(options);
 }

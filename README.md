@@ -6,7 +6,7 @@ Chrome DevTools Protocol over an iframe boundary. External CDP tools (agent-brow
 agent-browser / CDP client
         │  WebSocket (standard CDP, flat sessions)
         ▼
-      Relay   ←  icdp/relay (+ icdp/relay/bun)      server
+      Relay   ←  icdp/relay (+ icdp/relay/node)     server
         │  WebSocket (bridge protocol)
         ▼
       Host    ←  icdp/host                          parent window
@@ -41,7 +41,9 @@ host.pair(iframeElement, { targetId: "preview", origins: ["https://app.example.c
 
 // Local consumption — no server needed (e.g. a console panel):
 const session = host.attach("preview");
-session.onEvent((method, params) => { /* Runtime.consoleAPICalled, ... */ });
+session.onEvent((method, params) => {
+  /* Runtime.consoleAPICalled, ... */
+});
 await session.send("Runtime.enable");
 
 // Forward everything to a Relay so external tools can connect:
@@ -53,14 +55,14 @@ Target identity belongs to the Pairing: reloads and navigations keep the same `t
 ### Relay — the server
 
 ```ts
-import { serveRelay } from "icdp/relay/bun";
+import { serveRelay } from "icdp/relay/node";
 
-const relay = serveRelay({ port: 9222 });
+const relay = await serveRelay({ port: 9222 });
 console.log(relay.browserWsUrl); // ws://127.0.0.1:9222/devtools/browser  ← CDP clients
-console.log(relay.hostWsUrl);    // ws://127.0.0.1:9222/icdp/host         ← Host uplink
+console.log(relay.hostWsUrl); // ws://127.0.0.1:9222/icdp/host         ← Host uplink
 ```
 
-The runtime-agnostic core (`icdp/relay` → `RelayCore`) takes plain `{ send, close }` sockets, so other runtimes only need a thin adapter. HTTP discovery: `/json/version`, `/json/list`, `/icdp/status`.
+The Node adapter is built on `node:http` + `ws`. The runtime-agnostic core (`icdp/relay` → `RelayCore`) takes plain `{ send, close }` sockets, so other runtimes only need a thin adapter. HTTP discovery: `/json/version`, `/json/list`, `/icdp/status`.
 
 One Host per Relay, new-wins: a newly connecting Host replaces a stale one, with `targetDestroyed`/`targetCreated` churn surfaced to attached Clients.
 
@@ -83,12 +85,16 @@ Do not use `agent-browser connect <ws-url>`: as of agent-browser 0.27.x the sess
 
 ## Development
 
+Node ≥22, VoidZero tooling (Vitest, oxlint, oxfmt, tsdown/Rolldown):
+
 ```sh
-bun install
-bun test                            # unit + in-process integration + e2e conformance
-bun test tests/agent-browser.e2e.test.ts   # conformance suite alone (needs agent-browser CLI, ~90s)
-bun run check    # tsc + biome
-bun run build    # dist/
+npm install
+npm test             # unit + in-process integration (vitest)
+npm run test:e2e     # conformance suite (needs agent-browser CLI + Chrome, ~90s)
+npm run test:all     # everything
+npm run check        # tsc + oxlint + oxfmt --check
+npm run fmt          # oxfmt
+npm run build        # tsdown -> dist/
 ```
 
 The e2e conformance suite (ported from the prior art) drives the full chain with a real browser: agent-browser opens a shell page whose Host pairs with a **cross-origin** iframe running the Frame Agent, uplinked to a real Relay; a second agent-browser session then exercises snapshots, semantic locators, keyboard/mouse, navigation, and graceful failures through `--cdp`. Set `ICDP_DEBUG=1` to log all relay traffic.

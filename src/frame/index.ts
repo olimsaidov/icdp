@@ -12,7 +12,9 @@ import {
 import { createDomRegistry, getFullAXTree, getPartialAXTree } from "./ax-tree.ts";
 
 type CdpMethod = keyof ProtocolMapping.Commands;
-type CdpParams<Method extends CdpMethod> = NonNullable<ProtocolMapping.Commands[Method]["paramsType"][0]>;
+type CdpParams<Method extends CdpMethod> = NonNullable<
+  ProtocolMapping.Commands[Method]["paramsType"][0]
+>;
 
 type CdpRequest = {
   id?: CdpId;
@@ -103,9 +105,16 @@ function elementForBackendId(id: Protocol.DOM.BackendNodeId): Element {
 
 function boxModel(id: Protocol.DOM.BackendNodeId): Protocol.DOM.GetBoxModelResponse {
   const rect = elementForBackendId(id).getBoundingClientRect();
-  const quad = [rect.left, rect.top, rect.right, rect.top, rect.right, rect.bottom, rect.left, rect.bottom].map(
-    Math.round,
-  );
+  const quad = [
+    rect.left,
+    rect.top,
+    rect.right,
+    rect.top,
+    rect.right,
+    rect.bottom,
+    rect.left,
+    rect.bottom,
+  ].map(Math.round);
   return {
     model: {
       content: quad,
@@ -184,7 +193,8 @@ function runtimeValue(value: unknown): Protocol.Runtime.RemoteObject {
   if (value === undefined) return { type: "undefined" };
   if (value === null) return { type: "object", subtype: "null", value: null };
   if (value instanceof Node) return nodeRuntimeValue(value);
-  if (typeof value === "bigint") return { type: "bigint", unserializableValue: `${value}n`, description: `${value}n` };
+  if (typeof value === "bigint")
+    return { type: "bigint", unserializableValue: `${value}n`, description: `${value}n` };
   if (typeof value === "symbol") return { type: "symbol", description: String(value) };
   if (typeof value === "function") return { type: "function", description: String(value) };
   if (typeof value === "number" && !Number.isFinite(value))
@@ -227,7 +237,8 @@ function cloneConsoleObject(value: unknown, seen = new WeakSet<object>(), depth 
     return {
       tagName: value.tagName.toLowerCase(),
       id: value.id || undefined,
-      className: typeof value.className === "string" && value.className ? value.className : undefined,
+      className:
+        typeof value.className === "string" && value.className ? value.className : undefined,
       textContent: (value.textContent || "").trim().slice(0, 120) || undefined,
     };
   }
@@ -262,7 +273,8 @@ function cloneConsoleObject(value: unknown, seen = new WeakSet<object>(), depth 
 }
 
 function consoleRuntimeValue(value: unknown): Protocol.Runtime.RemoteObject {
-  if (value === undefined || value === null || typeof value !== "object") return runtimeValue(value);
+  if (value === undefined || value === null || typeof value !== "object")
+    return runtimeValue(value);
 
   const description =
     value instanceof Error
@@ -274,7 +286,13 @@ function consoleRuntimeValue(value: unknown): Protocol.Runtime.RemoteObject {
   return {
     type: "object",
     subtype:
-      value instanceof Error ? "error" : Array.isArray(value) ? "array" : value instanceof Element ? "node" : undefined,
+      value instanceof Error
+        ? "error"
+        : Array.isArray(value)
+          ? "array"
+          : value instanceof Element
+            ? "node"
+            : undefined,
     className: value.constructor?.name,
     description,
     value: cloneConsoleObject(value),
@@ -375,7 +393,8 @@ function highlight(el: Element): void {
 }
 
 function setNativeValue(el: HTMLInputElement | HTMLTextAreaElement, value: string): void {
-  const proto = el instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+  const proto =
+    el instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
   const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
   setter?.call(el, value);
 }
@@ -390,7 +409,9 @@ function insertText(text: string): void {
   highlight(el);
   if (el instanceof HTMLInputElement && !canSelectText(el)) {
     setNativeValue(el, text);
-    el.dispatchEvent(new InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }));
+    el.dispatchEvent(
+      new InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }),
+    );
     el.dispatchEvent(new Event("change", { bubbles: true }));
   } else if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
     const start = el.selectionStart ?? el.value.length;
@@ -400,7 +421,9 @@ function insertText(text: string): void {
     try {
       el.setSelectionRange(start + text.length, start + text.length);
     } catch {}
-    el.dispatchEvent(new InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }));
+    el.dispatchEvent(
+      new InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }),
+    );
     el.dispatchEvent(new Event("change", { bubbles: true }));
   } else if (el.isContentEditable) {
     document.execCommand("insertText", false, text);
@@ -420,7 +443,9 @@ function deleteBackward(): void {
     try {
       el.setSelectionRange(nextStart, nextStart);
     } catch {}
-    el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
+    el.dispatchEvent(
+      new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }),
+    );
     el.dispatchEvent(new Event("change", { bubbles: true }));
   } else if (el.isContentEditable) {
     document.execCommand("delete", false);
@@ -502,16 +527,22 @@ function querySelector(params: CdpParams<"DOM.querySelector">): Protocol.DOM.Que
   return { nodeId: element ? registry.backendIdFor(element) : 0 };
 }
 
-function querySelectorAll(params: CdpParams<"DOM.querySelectorAll">): Protocol.DOM.QuerySelectorAllResponse {
+function querySelectorAll(
+  params: CdpParams<"DOM.querySelectorAll">,
+): Protocol.DOM.QuerySelectorAllResponse {
   const root = queryRoot(params.nodeId);
   return {
-    nodeIds: Array.from(root.querySelectorAll(params.selector)).map((element) => registry.backendIdFor(element)),
+    nodeIds: Array.from(root.querySelectorAll(params.selector)).map((element) =>
+      registry.backendIdFor(element),
+    ),
   };
 }
 
 function matchingSearchNodes(query: string): Protocol.DOM.BackendNodeId[] {
   try {
-    return Array.from(document.querySelectorAll(query)).map((element) => registry.backendIdFor(element));
+    return Array.from(document.querySelectorAll(query)).map((element) =>
+      registry.backendIdFor(element),
+    );
   } catch {}
 
   const text = query.toLowerCase();
@@ -527,12 +558,16 @@ function performSearch(params: CdpParams<"DOM.performSearch">): Protocol.DOM.Per
   return { searchId, resultCount: nodes.length };
 }
 
-function getSearchResults(params: CdpParams<"DOM.getSearchResults">): Protocol.DOM.GetSearchResultsResponse {
+function getSearchResults(
+  params: CdpParams<"DOM.getSearchResults">,
+): Protocol.DOM.GetSearchResultsResponse {
   const nodes = searchResults.get(params.searchId) ?? [];
   return { nodeIds: nodes.slice(params.fromIndex, params.toIndex) };
 }
 
-function discardSearchResults(params: CdpParams<"DOM.discardSearchResults">): Record<string, never> {
+function discardSearchResults(
+  params: CdpParams<"DOM.discardSearchResults">,
+): Record<string, never> {
   searchResults.delete(params.searchId);
   return {};
 }
@@ -555,7 +590,9 @@ function focusNode(params: CdpParams<"DOM.focus">): Record<string, never> {
   return {};
 }
 
-function scrollIntoViewIfNeeded(params: CdpParams<"DOM.scrollIntoViewIfNeeded">): Record<string, never> {
+function scrollIntoViewIfNeeded(
+  params: CdpParams<"DOM.scrollIntoViewIfNeeded">,
+): Record<string, never> {
   elementForBackendId(Number(params.backendNodeId ?? params.nodeId)).scrollIntoView({
     block: "center",
     inline: "center",
@@ -604,7 +641,9 @@ function getBoxModel(params: CdpParams<"DOM.getBoxModel">): Protocol.DOM.GetBoxM
   return boxModel(Number(params.backendNodeId ?? params.nodeId));
 }
 
-function getContentQuads(params: CdpParams<"DOM.getContentQuads">): Protocol.DOM.GetContentQuadsResponse {
+function getContentQuads(
+  params: CdpParams<"DOM.getContentQuads">,
+): Protocol.DOM.GetContentQuadsResponse {
   return contentQuads(Number(params.backendNodeId ?? params.nodeId));
 }
 
@@ -645,13 +684,16 @@ function wheelEvent(params: CdpParams<"Input.dispatchMouseEvent">): WheelEvent {
 function scrollableAncestor(el: Element | null): Element | null {
   for (let current = el; current; current = current.parentElement) {
     const style = getComputedStyle(current);
-    if (/(auto|scroll)/.test(`${style.overflow}${style.overflowX}${style.overflowY}`)) return current;
+    if (/(auto|scroll)/.test(`${style.overflow}${style.overflowX}${style.overflowY}`))
+      return current;
   }
   return document.scrollingElement;
 }
 
 function dispatchMouseEvent(params: CdpParams<"Input.dispatchMouseEvent">): Record<string, never> {
-  const target = document.elementFromPoint(Number(params.x ?? 0), Number(params.y ?? 0)) || document.documentElement;
+  const target =
+    document.elementFromPoint(Number(params.x ?? 0), Number(params.y ?? 0)) ||
+    document.documentElement;
   if (!(target instanceof Element)) return {};
 
   if (params.type === "mouseMoved") {
@@ -670,7 +712,10 @@ function dispatchMouseEvent(params: CdpParams<"Input.dispatchMouseEvent">): Reco
     if (pressedElement === target) {
       (target as HTMLElement).click();
       const now = Date.now();
-      if (Number(params.clickCount ?? 1) > 1 || (lastClickElement === target && now - lastClickTime < 500)) {
+      if (
+        Number(params.clickCount ?? 1) > 1 ||
+        (lastClickElement === target && now - lastClickTime < 500)
+      ) {
         target.dispatchEvent(mouseEvent("dblclick", params));
       }
       lastClickElement = target;
@@ -705,34 +750,47 @@ function inputInsertText(params: CdpParams<"Input.insertText">): Record<string, 
 
 function navigate(params: CdpParams<"Page.navigate">): Protocol.Page.NavigateResponse {
   const next = new URL(String(params.url || "/"), location.href);
-  if (next.origin !== location.origin) throw new Error("Navigation outside the embedded app's origin is not allowed");
+  if (next.origin !== location.origin)
+    throw new Error("Navigation outside the embedded app's origin is not allowed");
   location.href = next.href;
   return { frameId };
 }
 
-async function evaluate(params: CdpParams<"Runtime.evaluate">): Promise<Protocol.Runtime.EvaluateResponse> {
+async function evaluate(
+  params: CdpParams<"Runtime.evaluate">,
+): Promise<Protocol.Runtime.EvaluateResponse> {
   // biome-ignore lint/security/noGlobalEval: CDP Runtime.evaluate intentionally executes page expressions.
   const indirectEval = globalThis.eval;
   const value = indirectEval(String(params.expression || ""));
-  return { result: runtimeValue(params.awaitPromise && value instanceof Promise ? await value : value) };
+  return {
+    result: runtimeValue(params.awaitPromise && value instanceof Promise ? await value : value),
+  };
 }
 
 async function callFunctionOn(
   params: CdpParams<"Runtime.callFunctionOn">,
 ): Promise<Protocol.Runtime.CallFunctionOnResponse> {
-  const id = String(params.objectId || "").startsWith("backend:") ? Number(String(params.objectId).slice(8)) : NaN;
+  const id = String(params.objectId || "").startsWith("backend:")
+    ? Number(String(params.objectId).slice(8))
+    : NaN;
   const target = Number.isFinite(id) ? elementForBackendId(id) : window;
   // biome-ignore lint/security/noGlobalEval: CDP Runtime.callFunctionOn intentionally executes page functions.
   const indirectEval = globalThis.eval;
-  const fn = indirectEval(`(${params.functionDeclaration})`) as (this: unknown, ...args: unknown[]) => unknown;
+  const fn = indirectEval(`(${params.functionDeclaration})`) as (
+    this: unknown,
+    ...args: unknown[]
+  ) => unknown;
   const value = fn.call(
     target,
     ...((params.arguments || []) as Array<{ value?: unknown; objectId?: string }>).map((arg) => {
-      if (arg.objectId?.startsWith("backend:")) return elementForBackendId(Number(arg.objectId.slice(8)));
+      if (arg.objectId?.startsWith("backend:"))
+        return elementForBackendId(Number(arg.objectId.slice(8)));
       return arg.value;
     }),
   );
-  return { result: runtimeValue(params.awaitPromise && value instanceof Promise ? await value : value) };
+  return {
+    result: runtimeValue(params.awaitPromise && value instanceof Promise ? await value : value),
+  };
 }
 
 cdp.register("Accessibility", {
@@ -829,7 +887,10 @@ async function handleCommand(raw: string): Promise<void> {
     if (request.id != null) outboundMethods.delete(request.id);
     sendToHost({
       id: request.id,
-      error: { code: CDP_SERVER_ERROR, message: error instanceof Error ? error.message : String(error) },
+      error: {
+        code: CDP_SERVER_ERROR,
+        message: error instanceof Error ? error.message : String(error),
+      },
     });
   }
 }

@@ -10,9 +10,13 @@
  * connection (verified against real Chrome too). The daemon's page model syncs
  * from live CDP on the first `wait`, so the harness issues one before tests.
  */
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { spawn } from "node:child_process";
+import { createServer, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
+import { rolldown } from "rolldown";
+import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
-import { serveRelay } from "../src/relay/bun.ts";
+import { serveRelay } from "../src/relay/node.ts";
 
 type AgentCommandResult = {
   exitCode: number;
@@ -39,23 +43,25 @@ let frameScript = "";
 let shellScript = "";
 const activeSessions = new Set<string>();
 
+async function bundleBrowser(input: string): Promise<string> {
+  const build = await rolldown({ input, platform: "browser", logLevel: "silent" });
+  try {
+    const { output } = await build.generate({ format: "esm" });
+    const entry = output.find((chunk) => chunk.type === "chunk" && chunk.isEntry);
+    if (!entry || entry.type !== "chunk") throw new Error(`no entry chunk for ${input}`);
+    return entry.code;
+  } finally {
+    await build.close();
+  }
+}
+
 beforeAll(async () => {
-  const build = await Bun.build({
-    entrypoints: ["tests/fixtures/frame-entry.ts", "tests/fixtures/shell-entry.ts"],
-    target: "browser",
-  });
-  if (!build.success) {
-    throw new Error(build.logs.map((log) => log.message).join("\n") || "Failed to build fixture bundles");
-  }
-  for (const output of build.outputs) {
-    if (output.path.includes("frame-entry")) frameScript = await output.text();
-    if (output.path.includes("shell-entry")) shellScript = await output.text();
-  }
-  if (!frameScript || !shellScript) throw new Error("fixture bundles missing from build output");
+  frameScript = await bundleBrowser("tests/fixtures/frame-entry.ts");
+  shellScript = await bundleBrowser("tests/fixtures/shell-entry.ts");
 });
 
 afterAll(async () => {
-  for (const session of [...activeSessions]) {
+  for (const session of Array.from(activeSessions)) {
     await runAgent(session, ["close"], { allowFailure: true, json: false, timeoutMs: 10_000 });
   }
 });
@@ -74,28 +80,39 @@ function parseJsonLine(stdout: string): any | undefined {
   return JSON.parse(line);
 }
 
-async function runAgent(session: string, args: string[], options: RunAgentOptions = {}): Promise<AgentCommandResult> {
+async function runAgent(
+  session: string,
+  args: string[],
+  options: RunAgentOptions = {},
+): Promise<AgentCommandResult> {
   const timeoutMs = options.timeoutMs ?? 30_000;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const command = ["agent-browser", "--session", session, ...(options.json === false ? [] : ["--json"]), ...args];
+  const command = ["--session", session, ...(options.json === false ? [] : ["--json"]), ...args];
 
-  const proc = Bun.spawn(command, {
-    cwd: process.cwd(),
-    stdout: "pipe",
-    stderr: "pipe",
-    signal: controller.signal,
+  const result = await new Promise<AgentCommandResult>((resolve) => {
+    const proc = spawn("agent-browser", command, { cwd: process.cwd() });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => proc.kill("SIGKILL"), timeoutMs);
+    proc.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    proc.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    proc.on("error", (error) => {
+      clearTimeout(timer);
+      resolve({ exitCode: -1, stdout, stderr: `${stderr}\n${error}`, json: undefined });
+    });
+    proc.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ exitCode: code ?? -1, stdout, stderr, json: parseJsonLine(stdout) });
+    });
   });
 
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]).finally(() => clearTimeout(timer));
-
-  const result = { exitCode, stdout, stderr, json: parseJsonLine(stdout) };
-  if (!options.allowFailure && exitCode !== 0) {
-    throw new Error(`agent-browser ${args.join(" ")} failed with ${exitCode}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  if (!options.allowFailure && result.exitCode !== 0) {
+    throw new Error(
+      `agent-browser ${args.join(" ")} failed with ${result.exitCode}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
   }
   return result;
 }
@@ -337,12 +354,14 @@ function fixtureHtml(shellOrigin: string): string {
 </html>`;
 }
 
-function jsResponse(source: string): Response {
-  return new Response(source, { headers: { "Content-Type": "application/javascript; charset=utf-8" } });
+function sendJs(response: ServerResponse, source: string): void {
+  response.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8" });
+  response.end(source);
 }
 
-function htmlResponse(source: string): Response {
-  return new Response(source, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+function sendHtml(response: ServerResponse, source: string): void {
+  response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+  response.end(source);
 }
 
 async function createHarness(): Promise<AgentHarness> {
@@ -354,31 +373,34 @@ async function createHarness(): Promise<AgentHarness> {
   let appOrigin = "";
   let shellOrigin = "";
 
-  const relay = serveRelay({
+  const relay = await serveRelay({
     product: "icdp-e2e/0.1",
-    fallback: (request) => {
-      const url = new URL(request.url);
-      if (url.pathname === "/shell.js") return jsResponse(shellScript);
-      return htmlResponse(shellHtml(appOrigin, relay.hostWsUrl));
+    fallback: (request, response) => {
+      const url = new URL(request.url ?? "/", "http://shell");
+      if (url.pathname === "/shell.js") return sendJs(response, shellScript);
+      sendHtml(response, shellHtml(appOrigin, relay.hostWsUrl));
     },
   });
 
-  const appServer = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    fetch(request) {
-      const url = new URL(request.url);
-      if (url.pathname === "/frame-agent.js") return jsResponse(frameScript);
-      return htmlResponse(fixtureHtml(shellOrigin));
-    },
+  const appServer = createServer((request, response) => {
+    const url = new URL(request.url ?? "/", "http://app");
+    if (url.pathname === "/frame-agent.js") return sendJs(response, frameScript);
+    sendHtml(response, fixtureHtml(shellOrigin));
   });
+  await new Promise<void>((resolve) => appServer.listen(0, "127.0.0.1", resolve));
 
-  shellOrigin = `http://127.0.0.1:${relay.server.port}`;
-  appOrigin = `http://127.0.0.1:${appServer.port}`;
+  shellOrigin = `http://127.0.0.1:${relay.port}`;
+  appOrigin = `http://127.0.0.1:${(appServer.address() as AddressInfo).port}`;
 
-  async function status(): Promise<{ hostConnected: boolean; targets: Array<{ targetId: string; url: string }> }> {
+  async function status(): Promise<{
+    hostConnected: boolean;
+    targets: Array<{ targetId: string; url: string }>;
+  }> {
     const response = await fetch(`${shellOrigin}/icdp/status`);
-    return (await response.json()) as { hostConnected: boolean; targets: Array<{ targetId: string; url: string }> };
+    return (await response.json()) as {
+      hostConnected: boolean;
+      targets: Array<{ targetId: string; url: string }>;
+    };
   }
 
   async function waitForTargetUrl(
@@ -399,23 +421,31 @@ async function createHarness(): Promise<AgentHarness> {
   }
 
   async function close(): Promise<void> {
-    await runAgent(targetSession, ["close"], { allowFailure: true, json: false, timeoutMs: 10_000 });
+    await runAgent(targetSession, ["close"], {
+      allowFailure: true,
+      json: false,
+      timeoutMs: 10_000,
+    });
     await runAgent(hostSession, ["close"], { allowFailure: true, json: false, timeoutMs: 10_000 });
     activeSessions.delete(targetSession);
     activeSessions.delete(hostSession);
-    appServer.stop(true);
-    relay.stop();
+    appServer.closeAllConnections();
+    await new Promise<void>((resolve) => appServer.close(() => resolve()));
+    await relay.stop();
   }
 
   // Real browser loads the shell; the shell's Host pairs with the cross-origin
   // iframe and uplinks to the Relay.
-  const openShell = await runAgent(hostSession, ["open", shellOrigin, "--headed", "false"], { timeoutMs: 60_000 });
+  const openShell = await runAgent(hostSession, ["open", shellOrigin, "--headed", "false"], {
+    timeoutMs: 60_000,
+  });
   expect(openShell.json?.success).toBe(true);
   await waitForTargetUrl((url) => url.startsWith(appOrigin), "frame agent pairing");
 
   // Every target-session command attaches through the Relay's browser endpoint.
-  const cdpArgs = ["--cdp", String(relay.server.port)];
-  const run = (args: string[], options?: RunAgentOptions) => runAgent(targetSession, [...cdpArgs, ...args], options);
+  const cdpArgs = ["--cdp", String(relay.port)];
+  const run = (args: string[], options?: RunAgentOptions) =>
+    runAgent(targetSession, [...cdpArgs, ...args], options);
 
   // First command syncs the daemon's page model from the live target.
   const sync = await run(["wait", "--text", "Fixture ready"], { timeoutMs: 30_000 });
@@ -429,7 +459,10 @@ async function createHarness(): Promise<AgentHarness> {
       const open = await run(["open", destination], { allowFailure: true, timeoutMs: 30_000 });
       if (!open.json?.success) {
         // Fall back to navigating from inside the page.
-        const response = await run(["eval", `location.href = ${JSON.stringify(destination)}; "navigating"`]);
+        const response = await run([
+          "eval",
+          `location.href = ${JSON.stringify(destination)}; "navigating"`,
+        ]);
         expect(response.json?.success).toBe(true);
       }
       await waitForTargetUrl((url) => url.startsWith(destination), `navigation to ${path}`);
@@ -535,12 +568,22 @@ describe("agent-browser against icdp (cross-origin iframe through relay + host)"
   test("returns page data and element state through get and is commands", async () => {
     const harness = await createHarness();
     try {
-      expect((await harness.run(["get", "title"])).json?.data.title).toBe("Agent Browser CDP Fixture");
+      expect((await harness.run(["get", "title"])).json?.data.title).toBe(
+        "Agent Browser CDP Fixture",
+      );
       expect((await harness.run(["get", "url"])).json?.data.url).toBe(`${harness.origin}/`);
-      expect((await harness.run(["get", "text", "#copy"])).json?.data.text).toBe("Stable copy for get text.");
-      expect((await harness.run(["get", "html", "#html-target"])).json?.data.html).toContain("Inner HTML");
-      expect((await harness.run(["get", "value", "#email"])).json?.data.value).toBe("initial@example.test");
-      expect((await harness.run(["get", "attr", "#titled-link", "title"])).json?.data.value).toBe("Titled Link");
+      expect((await harness.run(["get", "text", "#copy"])).json?.data.text).toBe(
+        "Stable copy for get text.",
+      );
+      expect((await harness.run(["get", "html", "#html-target"])).json?.data.html).toContain(
+        "Inner HTML",
+      );
+      expect((await harness.run(["get", "value", "#email"])).json?.data.value).toBe(
+        "initial@example.test",
+      );
+      expect((await harness.run(["get", "attr", "#titled-link", "title"])).json?.data.value).toBe(
+        "Titled Link",
+      );
       expect((await harness.run(["get", "count", "button"])).json?.data.count).toBeGreaterThan(10);
 
       const box = (await harness.run(["get", "box", "#role-action"])).json?.data;
@@ -550,10 +593,16 @@ describe("agent-browser against icdp (cross-origin iframe through relay + host)"
       expect(styles.display).toBe("inline-block");
 
       expect((await harness.run(["is", "visible", "#role-action"])).json?.data.visible).toBe(true);
-      expect((await harness.run(["is", "visible", "#display-none"])).json?.data.visible).toBe(false);
+      expect((await harness.run(["is", "visible", "#display-none"])).json?.data.visible).toBe(
+        false,
+      );
       expect((await harness.run(["is", "enabled", "#role-action"])).json?.data.enabled).toBe(true);
-      expect((await harness.run(["is", "enabled", "#disabled-button"])).json?.data.enabled).toBe(false);
-      expect((await harness.run(["is", "checked", "#checked-choice"])).json?.data.checked).toBe(true);
+      expect((await harness.run(["is", "enabled", "#disabled-button"])).json?.data.enabled).toBe(
+        false,
+      );
+      expect((await harness.run(["is", "checked", "#checked-choice"])).json?.data.checked).toBe(
+        true,
+      );
       expect((await harness.run(["is", "checked", "#follow-up"])).json?.data.checked).toBe(false);
     } finally {
       await harness.close();
@@ -565,7 +614,9 @@ describe("agent-browser against icdp (cross-origin iframe through relay + host)"
     try {
       expect((await harness.run(["wait", "#email"])).json?.success).toBe(true);
       expect((await harness.run(["wait", "--text", "Fixture ready"])).json?.success).toBe(true);
-      expect((await harness.run(["wait", "--fn", "window.fixtureState().ready === true"])).json?.success).toBe(true);
+      expect(
+        (await harness.run(["wait", "--fn", "window.fixtureState().ready === true"])).json?.success,
+      ).toBe(true);
       expect((await harness.run(["wait", "--load", "domcontentloaded"])).json?.success).toBe(true);
 
       expect((await harness.run(["focus", "#keyboard-input"])).json?.success).toBe(true);
@@ -584,8 +635,14 @@ describe("agent-browser against icdp (cross-origin iframe through relay + host)"
       expect((await harness.run(["dblclick", "#role-action"])).json?.success).toBe(true);
       const mouseBox = (await harness.run(["get", "box", "#mouse-target"])).json?.data;
       expect(
-        (await harness.run(["mouse", "move", String(Math.round(mouseBox.x)), String(Math.round(mouseBox.y))])).json
-          ?.success,
+        (
+          await harness.run([
+            "mouse",
+            "move",
+            String(Math.round(mouseBox.x)),
+            String(Math.round(mouseBox.y)),
+          ])
+        ).json?.success,
       ).toBe(true);
       expect((await harness.run(["mouse", "down"])).json?.success).toBe(true);
       expect((await harness.run(["mouse", "up"])).json?.success).toBe(true);
@@ -604,12 +661,14 @@ describe("agent-browser against icdp (cross-origin iframe through relay + host)"
       expect(state.scrollY).toBeGreaterThan(0);
       expect(state.offscreenTop).toBeLessThan(700);
 
-      expect(await evalValue(harness, "document.getElementById('email').value")).toBe("initial@example.test");
+      expect(await evalValue(harness, "document.getElementById('email').value")).toBe(
+        "initial@example.test",
+      );
       await harness.reset("/nav-a");
       expect((await harness.run(["wait", "--url", "nav-a"])).json?.success).toBe(true);
-      expect(await evalValue(harness, "history.pushState({}, '', '/nav-b?from=push'); location.href")).toContain(
-        "/nav-b?from=push",
-      );
+      expect(
+        await evalValue(harness, "history.pushState({}, '', '/nav-b?from=push'); location.href"),
+      ).toContain("/nav-b?from=push");
       expect((await harness.run(["wait", "--url", "nav-b?from=push"])).json?.success).toBe(true);
       expect((await harness.run(["back"])).json?.success).toBe(true);
       expect((await harness.run(["wait", "--url", "nav-a"])).json?.success).toBe(true);
@@ -634,7 +693,9 @@ describe("agent-browser against icdp (cross-origin iframe through relay + host)"
       expect((await harness.run(["select", "#tags", "alpha", "beta"])).json?.success).toBe(true);
       expect((await harness.run(["fill", "#notes", "Updated note"])).json?.success).toBe(true);
       expect((await harness.run(["focus", "#editable"])).json?.success).toBe(true);
-      expect((await harness.run(["keyboard", "inserttext", "Editable text"])).json?.success).toBe(true);
+      expect((await harness.run(["keyboard", "inserttext", "Editable text"])).json?.success).toBe(
+        true,
+      );
 
       const state = await fixtureState(harness);
       expect(state.followUp).toBe(true);

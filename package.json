@@ -2,49 +2,61 @@
   "name": "icdp",
   "version": "0.1.0",
   "description": "Chrome DevTools Protocol over an iframe boundary: drive and inspect embedded (including cross-origin) apps with CDP tools, without a real browser debugging session.",
-  "type": "module",
-  "exports": {
-    "./frame": {
-      "types": "./dist/frame/index.d.ts",
-      "default": "./dist/frame/index.js"
-    },
-    "./host": {
-      "types": "./dist/host/index.d.ts",
-      "default": "./dist/host/index.js"
-    },
-    "./relay": {
-      "types": "./dist/relay/core.d.ts",
-      "default": "./dist/relay/core.js"
-    },
-    "./relay/bun": {
-      "types": "./dist/relay/bun.d.ts",
-      "default": "./dist/relay/bun.js"
-    },
-    "./protocol": {
-      "types": "./dist/protocol.d.ts",
-      "default": "./dist/protocol.js"
-    }
-  },
   "files": [
     "dist",
     "src",
     "README.md"
   ],
+  "type": "module",
+  "exports": {
+    "./frame": {
+      "types": "./dist/frame/index.d.mts",
+      "default": "./dist/frame/index.mjs"
+    },
+    "./host": {
+      "types": "./dist/host/index.d.mts",
+      "default": "./dist/host/index.mjs"
+    },
+    "./relay": {
+      "types": "./dist/relay/core.d.mts",
+      "default": "./dist/relay/core.mjs"
+    },
+    "./relay/node": {
+      "types": "./dist/relay/node.d.mts",
+      "default": "./dist/relay/node.mjs"
+    },
+    "./protocol": {
+      "types": "./dist/protocol.d.mts",
+      "default": "./dist/protocol.mjs"
+    }
+  },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "check": "tsc -p tsconfig.json --noEmit && biome check .",
-    "test": "bun test"
+    "build": "tsdown",
+    "check": "tsc --noEmit && oxlint && oxfmt --check .",
+    "fmt": "oxfmt .",
+    "test": "vitest run --exclude '**/*.e2e.test.ts'",
+    "test:e2e": "vitest run tests/agent-browser.e2e.test.ts",
+    "test:all": "vitest run"
   },
   "dependencies": {
     "aria-query": "^5.3.2",
     "chobitsu": "1.8.6",
     "devtools-protocol": "^0.0.1624250",
-    "dom-accessibility-api": "^0.7.1"
+    "dom-accessibility-api": "^0.7.1",
+    "ws": "^8.21.0"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.4.14",
     "@types/aria-query": "^5.0.4",
-    "@types/bun": "^1",
-    "typescript": "^5"
+    "@types/node": "^24",
+    "@types/ws": "^8",
+    "oxfmt": "^0.54.0",
+    "oxlint": "^1.69.0",
+    "rolldown": "^1.1.1",
+    "tsdown": "^0.22.2",
+    "typescript": "^5",
+    "vitest": "^4.1.8"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

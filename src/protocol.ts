@@ -116,7 +116,9 @@ export type RelayToHostMessage = BridgeCommand | BridgeDetached;
 
 export function parseJson<T>(raw: string | Buffer | ArrayBuffer | Uint8Array): T | null {
   try {
-    return JSON.parse(typeof raw === "string" ? raw : new TextDecoder().decode(raw as Uint8Array)) as T;
+    return JSON.parse(
+      typeof raw === "string" ? raw : new TextDecoder().decode(raw as Uint8Array),
+    ) as T;
   } catch {
     return null;
   }

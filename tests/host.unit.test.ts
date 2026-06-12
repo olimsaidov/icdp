@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 
 import { type FrameElementLike, IcdpHost, type WindowLike } from "../src/host/index.ts";
 
@@ -60,7 +60,9 @@ async function connect(options: { origins?: string[] | "*" } = {}) {
     source: frame.contentWindow,
   });
 
-  const welcome = frame.posted.find((post) => (post.message as { icdp?: string }).icdp === "welcome");
+  const welcome = frame.posted.find(
+    (post) => (post.message as { icdp?: string }).icdp === "welcome",
+  );
   if (!welcome) throw new Error("no welcome posted");
   const framePort = welcome.transfer[0] as MessagePort;
 
@@ -77,7 +79,7 @@ describe("handshake", () => {
     const host = new IcdpHost(win);
     const frame = fakeIframe();
     host.pair(frame.iframe, { targetId: "preview", origins: "*" });
-    expect((frame.posted[0]?.message as { icdp: string }).icdp).toBe("probe");
+    expect((frame.posted[0]?.message as { icdp: string } | undefined)?.icdp).toBe("probe");
     expect(host.targets().map((target) => target.targetId)).toEqual(["preview"]);
   });
 
@@ -91,7 +93,9 @@ describe("handshake", () => {
       origin: "http://evil.test",
       source: frame.contentWindow,
     });
-    expect(frame.posted.some((post) => (post.message as { icdp?: string }).icdp === "welcome")).toBe(false);
+    expect(
+      frame.posted.some((post) => (post.message as { icdp?: string }).icdp === "welcome"),
+    ).toBe(false);
   });
 
   test("hello from an unknown window is ignored", () => {
@@ -104,12 +108,16 @@ describe("handshake", () => {
       origin: FRAME_ORIGIN,
       source: { not: "the iframe" },
     });
-    expect(frame.posted.some((post) => (post.message as { icdp?: string }).icdp === "welcome")).toBe(false);
+    expect(
+      frame.posted.some((post) => (post.message as { icdp?: string }).icdp === "welcome"),
+    ).toBe(false);
   });
 
   test("welcome transfers a port and updates target info", async () => {
     const { host } = await connect();
-    expect(host.targets()).toEqual([{ targetId: "preview", title: "App", url: `${FRAME_ORIGIN}/` }]);
+    expect(host.targets()).toEqual([
+      { targetId: "preview", title: "App", url: `${FRAME_ORIGIN}/` },
+    ]);
   });
 });
 
@@ -131,8 +139,10 @@ describe("local sessions", () => {
     const session = host.attach("preview");
     const pending = session.send("Page.navigate", { url: "http://other.test" });
     await flush();
-    framePort.postMessage(JSON.stringify({ id: received[0]?.id, error: { code: -32000, message: "denied" } }));
-    expect(pending).rejects.toThrow("denied");
+    framePort.postMessage(
+      JSON.stringify({ id: received[0]?.id, error: { code: -32000, message: "denied" } }),
+    );
+    await expect(pending).rejects.toThrow("denied");
   });
 
   test("events are broadcast to all attached sessions", async () => {
@@ -142,7 +152,9 @@ describe("local sessions", () => {
     host.attach("preview").onEvent((method) => seenA.push(method));
     host.attach("preview").onEvent((method) => seenB.push(method));
 
-    framePort.postMessage(JSON.stringify({ method: "Runtime.consoleAPICalled", params: { type: "log" } }));
+    framePort.postMessage(
+      JSON.stringify({ method: "Runtime.consoleAPICalled", params: { type: "log" } }),
+    );
     await flush();
     expect(seenA).toEqual(["Runtime.consoleAPICalled"]);
     expect(seenB).toEqual(["Runtime.consoleAPICalled"]);
@@ -154,7 +166,7 @@ describe("local sessions", () => {
     const frame = fakeIframe();
     host.pair(frame.iframe, { targetId: "preview", origins: "*" });
     const session = host.attach("preview");
-    expect(session.send("DOM.getDocument")).rejects.toThrow("not connected");
+    await expect(session.send("DOM.getDocument")).rejects.toThrow("not connected");
   });
 });
 
@@ -166,7 +178,8 @@ describe("enable ref-counting", () => {
 
     const enables = [sessionA.send("Runtime.enable"), sessionB.send("Runtime.enable")];
     await flush();
-    for (const command of received) framePort.postMessage(JSON.stringify({ id: command.id, result: {} }));
+    for (const command of received)
+      framePort.postMessage(JSON.stringify({ id: command.id, result: {} }));
     await Promise.all(enables);
 
     const before = received.length;
@@ -208,9 +221,11 @@ describe("pairing lifecycle", () => {
       source: frame.contentWindow,
     });
 
-    expect(pending).rejects.toThrow("Target reloaded");
+    await expect(pending).rejects.toThrow("Target reloaded");
     expect(host.targets()[0]?.url).toBe(`${FRAME_ORIGIN}/v2`);
-    const welcomes = frame.posted.filter((post) => (post.message as { icdp?: string }).icdp === "welcome");
+    const welcomes = frame.posted.filter(
+      (post) => (post.message as { icdp?: string }).icdp === "welcome",
+    );
     expect(welcomes).toHaveLength(2);
   });
 
@@ -221,7 +236,7 @@ describe("pairing lifecycle", () => {
     const session = host.attach("preview");
     const pending = session.send("DOM.getDocument");
     host.unpair("preview");
-    expect(pending).rejects.toThrow("Target destroyed");
+    await expect(pending).rejects.toThrow("Target destroyed");
     expect(events).toContain("targetDestroyed");
   });
 });

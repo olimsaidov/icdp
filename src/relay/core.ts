@@ -99,7 +99,9 @@ export class RelayCore {
         return;
       case "targetInfoChanged": {
         this.targets.set(message.target.targetId, message.target);
-        this.broadcastTargetEvent("Target.targetInfoChanged", { targetInfo: this.targetInfo(message.target) });
+        this.broadcastTargetEvent("Target.targetInfoChanged", {
+          targetInfo: this.targetInfo(message.target),
+        });
         return;
       }
       case "response": {
@@ -129,7 +131,12 @@ export class RelayCore {
   }
 
   clientConnected(socket: SocketLike): void {
-    this.clients.set(socket, { socket, autoAttach: false, discoverTargets: false, sessions: new Set() });
+    this.clients.set(socket, {
+      socket,
+      autoAttach: false,
+      discoverTargets: false,
+      sessions: new Set(),
+    });
   }
 
   clientDisconnected(socket: SocketLike): void {
@@ -208,7 +215,9 @@ export class RelayCore {
       type: "page",
       title: target.title,
       url: target.url,
-      attached: Array.from(this.sessions.values()).some((session) => session.targetId === target.targetId),
+      attached: Array.from(this.sessions.values()).some(
+        (session) => session.targetId === target.targetId,
+      ),
       canAccessOpener: false,
     };
   }
@@ -243,7 +252,8 @@ export class RelayCore {
   private removeTarget(targetId: string, reason: string): void {
     if (!this.targets.delete(targetId)) return;
     for (const session of Array.from(this.sessions.values())) {
-      if (session.targetId === targetId) this.endSession(session.sessionId, { notifyClient: true, failReason: reason });
+      if (session.targetId === targetId)
+        this.endSession(session.sessionId, { notifyClient: true, failReason: reason });
     }
     this.broadcastTargetEvent("Target.targetDestroyed", { targetId });
   }
@@ -274,7 +284,10 @@ export class RelayCore {
     return session;
   }
 
-  private endSession(sessionId: string, options: { notifyClient: boolean; failReason?: string }): void {
+  private endSession(
+    sessionId: string,
+    options: { notifyClient: boolean; failReason?: string },
+  ): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     this.sessions.delete(sessionId);
@@ -372,7 +385,15 @@ export class RelayCore {
       case "Target.getTargetInfo": {
         const target = this.targets.get(session.targetId);
         if (!target)
-          return { targetInfo: { targetId: session.targetId, type: "page", title: "", url: "", attached: true } };
+          return {
+            targetInfo: {
+              targetId: session.targetId,
+              type: "page",
+              title: "",
+              url: "",
+              attached: true,
+            },
+          };
         return { targetInfo: this.targetInfo(target) };
       }
       default:
@@ -381,7 +402,10 @@ export class RelayCore {
   }
 
   /** Browser-level methods the Relay answers itself; undefined = not local. */
-  private browserLevelResult(client: ClientState, message: CdpMessage): unknown | typeof RESPONDED | undefined {
+  private browserLevelResult(
+    client: ClientState,
+    message: CdpMessage,
+  ): unknown | typeof RESPONDED | undefined {
     switch (message.method) {
       case "Browser.getVersion":
         return {
@@ -402,11 +426,14 @@ export class RelayCore {
       case "Schema.getDomains":
         return { domains: [] };
       case "Target.getTargets":
-        return { targetInfos: Array.from(this.targets.values(), (target) => this.targetInfo(target)) };
+        return {
+          targetInfos: Array.from(this.targets.values(), (target) => this.targetInfo(target)),
+        };
       case "Target.getTargetInfo": {
         const targetId = String(message.params?.targetId ?? "");
         const target = this.targets.get(targetId);
-        if (!target) return { targetInfo: { targetId, type: "page", title: "", url: "", attached: false } };
+        if (!target)
+          return { targetInfo: { targetId, type: "page", title: "", url: "", attached: false } };
         return { targetInfo: this.targetInfo(target) };
       }
       case "Target.setDiscoverTargets": {
@@ -440,7 +467,10 @@ export class RelayCore {
         if (!this.targets.has(targetId)) {
           this.sendToClient(client, {
             id: message.id,
-            error: { code: CDP_SERVER_ERROR, message: `No target with given id found: ${targetId}` },
+            error: {
+              code: CDP_SERVER_ERROR,
+              message: `No target with given id found: ${targetId}`,
+            },
           });
           return RESPONDED;
         }
@@ -457,7 +487,8 @@ export class RelayCore {
           id: message.id,
           error: {
             code: CDP_SERVER_ERROR,
-            message: "Target.createTarget is not supported: icdp targets are iframes paired by the Host.",
+            message:
+              "Target.createTarget is not supported: icdp targets are iframes paired by the Host.",
           },
         });
         return RESPONDED;
