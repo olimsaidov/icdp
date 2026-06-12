@@ -96,7 +96,7 @@ describe("relay + host + frame, end to end", () => {
   });
 
   afterAll(async () => {
-    for (const cleanup of cleanups.reverse()) await cleanup();
+    for (const cleanup of cleanups.toReversed()) await cleanup();
   });
 
   test("full command round-trip from a WebSocket client to the frame", async () => {

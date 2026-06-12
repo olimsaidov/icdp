@@ -599,14 +599,14 @@ function buildAX(
   }
 
   if (!isElement(node)) return [];
-  const ignoredReason = ignoredReasonFor(node);
-  if (ignoredReason) {
+  const reasonIgnored = ignoredReasonFor(node);
+  if (reasonIgnored) {
     const role = roleOf(node);
     const nodeId = axIdFor(node);
     out.push({
       nodeId,
       ignored: true,
-      ignoredReasons: [ignoredReason],
+      ignoredReasons: [reasonIgnored],
       role: role ? ax("role", role) : undefined,
       name: ax(
         "computedString",

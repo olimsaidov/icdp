@@ -1,0 +1,25 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "oxc"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "warn",
+    "perf": "warn"
+  },
+  "rules": {
+    // Sequential awaits in loops are deliberate throughout the test harnesses
+    // (agent-browser commands must run in order).
+    "eslint/no-await-in-loop": "off",
+    // Ported AX/CDP code uses dunder-prefixed page globals by design.
+    "eslint/no-underscore-dangle": "off",
+    // MessagePort.postMessage takes no targetOrigin; the rule misfires on ports.
+    "unicorn/require-post-message-target-origin": "off",
+    // Assigning MessagePort.onmessage is deliberate: it implicitly starts the
+    // port, which addEventListener does not.
+    "unicorn/prefer-add-event-listener": "off"
+  },
+  "env": {
+    "builtin": true
+  },
+  "ignorePatterns": ["dist", "node_modules"]
+}

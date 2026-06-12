@@ -13,6 +13,7 @@
 import { spawn } from "node:child_process";
 import { createServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+
 import { rolldown } from "rolldown";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
@@ -74,7 +75,7 @@ function parseJsonLine(stdout: string): any | undefined {
   const line = stdout
     .trim()
     .split(/\n/)
-    .reverse()
+    .toReversed()
     .find((item) => item.trim().startsWith("{"));
   if (!line) return undefined;
   return JSON.parse(line);
