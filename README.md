@@ -85,25 +85,7 @@ Do not use `agent-browser connect <ws-url>`: as of agent-browser 0.27.x the sess
 
 ## Playground
 
-```sh
-npm run playground
-```
-
-Starts the full topology on fixed ports: a shell page (Host) at `http://127.0.0.1:9222` embedding **two cross-origin targets** from `http://127.0.0.1:9223` — a feature-dense playground app (forms, SPA tabs, async waits, console buttons, shadow DOM, hidden cases, scroll zones, live state via `window.playgroundState()`) and a todo mini-app. The shell shows the live target table and a console panel fed by a **local session** (no relay in that path), plus Reload / Unpair buttons to exercise target lifecycle.
-
-Open the shell in any browser, then drive it:
-
-```sh
-agent-browser open http://127.0.0.1:9222
-agent-browser --cdp 9222 wait --text "icdp Playground"   # first command syncs the model
-agent-browser --cdp 9222 snapshot -i
-agent-browser --cdp 9222 scrollintoview "#load-data"     # below-fold targets need this first
-agent-browser --cdp 9222 click "#load-data"
-agent-browser --cdp 9222 wait --text "Lab results loaded"
-agent-browser --cdp 9222 eval "window.playgroundState()"
-```
-
-Two quirks to know: coordinate-based clicks resolve via `elementFromPoint`, so **scroll below-fold elements into view before clicking** (inherited from the prior art); and if agent-browser starts answering from `about:blank`, its daemon has gone stale — `pkill -f agent-browser` and retry (a known agent-browser 0.27 issue, not an icdp one).
+`npm run playground` starts a runnable demo of the full topology — see [playground/README.md](./playground/README.md).
 
 ## Development
 
