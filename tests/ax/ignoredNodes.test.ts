@@ -74,6 +74,21 @@ describe("ignored nodes", () => {
       expect(reason.value).toEqual({ type: "boolean", value: true });
   });
 
+  test("explicit role=presentation => ignored presentationalRole, inherited by list items", () => {
+    const { nodes, backendIdFor } = buildContext(`<ul role="presentation"><li>x</li></ul>`);
+    expect(reasonsOf(byBackendId(nodes, backendIdFor("ul")))).toContain("presentationalRole");
+    expect(reasonsOf(byBackendId(nodes, backendIdFor("li")))).toContain("presentationalRole");
+  });
+
+  test("role=presentation on a plain container does NOT make its children presentational", () => {
+    const { nodes, backendIdFor } = buildContext(
+      `<div role="presentation"><button>x</button></div>`,
+    );
+    const button = byBackendId(nodes, backendIdFor("button"));
+    expect(button?.ignored ?? false).toBe(false);
+    expect(button?.role?.value).toBe("button");
+  });
+
   test("the hidden attribute maps to notRendered (Chromium has no bespoke 'hidden' reason)", () => {
     const { nodes, backendIdFor } = buildContext(`<button hidden>x</button>`);
     const reasons = reasonsOf(byBackendId(nodes, backendIdFor("button")));

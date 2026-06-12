@@ -56,6 +56,11 @@ describe("value handling", () => {
     expect(byRole(nodes, "progressbar")?.value).toBeUndefined();
   });
 
+  test("a contenteditable textbox reports its text as the value", () => {
+    const nodes = build(`<div role="textbox" contenteditable="true">hello</div>`);
+    expect(byRole(nodes, "textbox")?.value).toEqual({ type: "string", value: "hello" });
+  });
+
   test("password value is masked, not cleartext", () => {
     const nodes = build(`<input type="password" value="hunter2">`);
     expect(byRole(nodes, "textbox")?.value).toEqual({ type: "string", value: "•••••••" });

@@ -93,6 +93,32 @@ describe("Accessibility.getFullAXTree", () => {
         "childIds": "<object>",
         "ignored": false,
         "name": {
+          "sources": [
+            {
+              "attribute": "aria-labelledby",
+              "type": "relatedElement",
+            },
+            {
+              "attribute": "aria-label",
+              "type": "attribute",
+            },
+            {
+              "nativeSource": "label",
+              "type": "relatedElement",
+            },
+            {
+              "type": "contents",
+              "value": {
+                "type": "computedString",
+                "value": "Go",
+              },
+            },
+            {
+              "attribute": "title",
+              "superseded": true,
+              "type": "attribute",
+            },
+          ],
           "type": "computedString",
           "value": "Go",
         },

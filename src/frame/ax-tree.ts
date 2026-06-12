@@ -9,6 +9,7 @@ import {
 } from "dom-accessibility-api";
 
 type AXValue = Protocol.Accessibility.AXValue;
+type AXValueSource = Protocol.Accessibility.AXValueSource;
 type AXProperty = Protocol.Accessibility.AXProperty;
 type AXNode = Protocol.Accessibility.AXNode;
 type AXPropertyName = Protocol.Accessibility.AXPropertyName;
@@ -62,6 +63,7 @@ const INTERNAL_ROLES = new Set([
   "StaticText",
   "RootWebArea",
   "ListMarker",
+  "DisclosureTriangle",
   "MathMLMath",
   "MathMLIdentifier",
   "MathMLOperator",
@@ -111,6 +113,7 @@ function implicitRole(el: Element): string | null {
   if (tag === "mi") return "MathMLIdentifier";
   if (tag === "mo") return "MathMLOperator";
   if (tag === "mn") return "MathMLNumber";
+  if (tag === "summary" && el.parentElement?.localName === "details") return "DisclosureTriangle";
   const role = getRole(el);
   if (role && ariaRoles.has(role as never)) return role;
 
@@ -156,6 +159,27 @@ function roleOf(el: Element): string | null {
   return role === "img" ? "image" : role;
 }
 
+// An explicit role=none/presentation makes the element presentational unless it
+// is focusable or carries a global aria-* label (conditional presentation).
+function isPresentational(el: Element): boolean {
+  const attr = el.getAttribute("role");
+  if (!attr) return false;
+  let presentational = false;
+  for (const token of attr.trim().split(/\s+/)) {
+    if (token === "none" || token === "presentation") {
+      presentational = true;
+      break;
+    }
+    if (ariaRoles.has((token === "image" ? "img" : token) as never)) return false;
+  }
+  if (!presentational) return false;
+  if (el.hasAttribute("aria-label") || el.hasAttribute("aria-labelledby")) return false;
+  return !isFocusable(el);
+}
+
+// Containers whose children are required-owned and so inherit presentational.
+const PRESENTATIONAL_INHERITS = new Set(["ul", "ol", "table", "thead", "tbody", "tfoot", "tr"]);
+
 function ignoredReasonFor(el: Element): AXProperty | undefined {
   const style = getComputedStyle(el);
   // The `hidden` attribute computes to display:none; Chromium reports notRendered
@@ -166,6 +190,7 @@ function ignoredReasonFor(el: Element): AXProperty | undefined {
   if (style.display === "none") return ignoredReason("notRendered");
   if (style.visibility === "hidden" || style.visibility === "collapse")
     return ignoredReason("notVisible");
+  if (isPresentational(el)) return ignoredReason("presentationalRole");
 
   for (let parent = el.parentElement; parent; parent = parent.parentElement) {
     const parentStyle = getComputedStyle(parent);
@@ -216,6 +241,7 @@ const RENDERED_IGNORED_REASONS = new Set<AXPropertyName>([
   "ariaHiddenSubtree",
   "inertElement",
   "inertSubtree",
+  "presentationalRole",
 ]);
 
 /** The subtree-variant of an element's ignored reason, inherited by descendants. */
@@ -398,6 +424,12 @@ function valueFor(el: Element, role: string): AXValue | undefined {
     return el.value ? ax("string", el.value) : undefined;
   }
 
+  // contenteditable elements report their text as the value.
+  if (contentEditable(el)) {
+    const text = normalizeText(el.textContent);
+    return text ? ax("string", text) : undefined;
+  }
+
   return undefined;
 }
 
@@ -460,6 +492,173 @@ function accessibleNameFor(el: Element, role: string): string {
   )
     return computeAccessibleName(el);
   return "";
+}
+
+// Roles that take their name from the element's text contents (W3C AccName).
+const NAME_FROM_CONTENTS_ROLES = new Set([
+  "button",
+  "DisclosureTriangle",
+  "cell",
+  "checkbox",
+  "columnheader",
+  "gridcell",
+  "heading",
+  "link",
+  "menuitem",
+  "menuitemcheckbox",
+  "menuitemradio",
+  "option",
+  "radio",
+  "row",
+  "rowheader",
+  "switch",
+  "tab",
+  "tooltip",
+  "treeitem",
+]);
+
+function normalizeText(value: string | null | undefined): string {
+  return (value || "").replace(/\s+/g, " ").trim();
+}
+
+function nameFromElements(els: Element[]): string {
+  return els
+    .map((el) => normalizeText(computeAccessibleName(el) || el.textContent))
+    .filter(Boolean)
+    .join(" ");
+}
+
+type NameCandidate = {
+  base: AXValueSource;
+  value: string;
+  attributeValue?: AXValue;
+  nativeSourceValue?: AXValue;
+  invalid?: boolean;
+};
+
+/** Ordered AccName source candidates for an element, matching Chromium's
+ *  NameSources: every candidate is listed; the first non-empty one wins, later
+ *  ones are marked superseded. */
+function nameSources(options: AXTreeOptions, el: Element, role: string): AXValueSource[] {
+  const candidates: NameCandidate[] = [];
+
+  // aria-labelledby (relatedElement)
+  const labelledbyIds = idRefs(el, "aria-labelledby");
+  const labelledby: NameCandidate = {
+    base: { type: "relatedElement", attribute: "aria-labelledby" },
+    value: nameFromElements(
+      labelledbyIds
+        .map((id) => el.ownerDocument.getElementById(id))
+        .filter((e): e is HTMLElement => e != null),
+    ),
+  };
+  if (labelledbyIds.length) {
+    const related = relatedNodesFor(options, el, labelledbyIds, true);
+    labelledby.attributeValue = {
+      type: "idrefList",
+      value: labelledbyIds.join(" "),
+      relatedNodes: related,
+    };
+    if (!related.length) labelledby.invalid = true;
+  }
+  candidates.push(labelledby);
+
+  // aria-label (attribute)
+  candidates.push(attributeCandidate(el, "aria-label", "aria-label"));
+
+  // native source slot (varies by element)
+  if (el instanceof HTMLImageElement) {
+    candidates.push(attributeCandidate(el, "alt", "alt"));
+  } else if (isLabelable(el)) {
+    candidates.push(nativeCandidate(options, "label", nativeLabels(el)));
+  } else if (el.localName === "figure") {
+    candidates.push(nativeCandidate(options, "figcaption", queryChildren(el, "figcaption")));
+  } else if (el.localName === "fieldset") {
+    candidates.push(nativeCandidate(options, "legend", queryChildren(el, "legend")));
+  } else if (el.localName === "table") {
+    candidates.push(nativeCandidate(options, "tablecaption", queryChildren(el, "caption")));
+  }
+
+  // contents (only for roles named from content)
+  if (NAME_FROM_CONTENTS_ROLES.has(role))
+    candidates.push({ base: { type: "contents" }, value: normalizeText(el.textContent) });
+
+  // placeholder (text inputs)
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)
+    candidates.push(attributeCandidate(el, "placeholder", "placeholder", "placeholder"));
+
+  // title (attribute)
+  candidates.push(attributeCandidate(el, "title", "title"));
+
+  const winner = candidates.findIndex((candidate) => candidate.value);
+  return candidates.map((candidate, index) => {
+    const source: AXValueSource = Object.assign({}, candidate.base);
+    if (candidate.attributeValue) source.attributeValue = candidate.attributeValue;
+    if (candidate.nativeSourceValue) source.nativeSourceValue = candidate.nativeSourceValue;
+    if (candidate.invalid) source.invalid = true;
+    if (index === winner) {
+      source.value = ax("computedString", candidate.value);
+    } else if (winner >= 0 && index > winner) {
+      source.superseded = true;
+      if (candidate.value) source.value = ax("computedString", candidate.value);
+    }
+    return source;
+  });
+}
+
+function attributeCandidate(
+  el: Element,
+  attribute: string,
+  label: string,
+  type: AXValueSource["type"] = "attribute",
+): NameCandidate {
+  const raw = el.getAttribute(attribute);
+  const value = normalizeText(raw);
+  const candidate: NameCandidate = { base: { type, attribute: label }, value };
+  if (raw != null && raw !== "") candidate.attributeValue = { type: "string", value: raw };
+  return candidate;
+}
+
+function nativeCandidate(
+  options: AXTreeOptions,
+  nativeSource: AXValueSource["nativeSource"] & string,
+  els: Element[],
+): NameCandidate {
+  const candidate: NameCandidate = {
+    base: { type: "relatedElement", nativeSource },
+    value: nameFromElements(els),
+  };
+  if (els.length)
+    candidate.nativeSourceValue = {
+      type: "nodeList",
+      relatedNodes: els.map((el) => ({
+        backendDOMNodeId: options.registry.backendIdFor(el),
+        text: normalizeText(el.textContent) || undefined,
+      })),
+    };
+  return candidate;
+}
+
+function isLabelable(el: Element): boolean {
+  return (
+    el instanceof HTMLButtonElement ||
+    el instanceof HTMLInputElement ||
+    el instanceof HTMLTextAreaElement ||
+    el instanceof HTMLSelectElement ||
+    el instanceof HTMLOutputElement ||
+    el instanceof HTMLMeterElement ||
+    el instanceof HTMLProgressElement
+  );
+}
+
+function nativeLabels(el: Element): Element[] {
+  const labels = (el as { labels?: NodeListOf<HTMLLabelElement> | null }).labels;
+  return labels ? Array.from(labels) : [];
+}
+
+function queryChildren(el: Element, selector: string): Element[] {
+  const match = el.querySelector(selector);
+  return match ? [match] : [];
 }
 
 function addRelationProp(
@@ -796,23 +995,21 @@ function buildAX(
   }
 
   if (!isElement(node)) return [];
-  const reasonIgnored = ignoredReasonFor(node);
+  const reasonIgnored = ignoredReasonFor(node) ?? inheritedIgnore;
   if (reasonIgnored) {
     const nodeId = axIdFor(node);
-    // Recurse into still-rendered-but-ignored subtrees (aria-hidden / inert) so
-    // their descendants stay discoverable, mirroring Chromium's "ignored but
-    // included in tree" model. Descendants inherit the subtree-variant reason.
+    // Recurse into still-rendered-but-ignored subtrees (aria-hidden / inert /
+    // presentational) so descendants stay discoverable, mirroring Chromium's
+    // "ignored but included in tree" model. Presentational inheritance only flows
+    // to required-owned children (a list's items, a table's rows/cells).
+    const childReason =
+      reasonIgnored.name === "presentationalRole" && !PRESENTATIONAL_INHERITS.has(node.localName)
+        ? undefined
+        : subtreeReason(reasonIgnored.name);
     const children =
       RENDERED_IGNORED_REASONS.has(reasonIgnored.name) && depthLeft > 0
         ? composedChildren(node).flatMap((child) =>
-            buildAX(
-              options,
-              child,
-              undefined,
-              out,
-              subtreeReason(reasonIgnored.name),
-              depthLeft - 1,
-            ),
+            buildAX(options, child, undefined, out, childReason, depthLeft - 1),
           )
         : [];
     // Chromium serializes ignored nodes with role:none and no name on the
@@ -861,12 +1058,14 @@ function buildAX(
 
   const nodeId = axIdFor(node);
   const name = role ? accessibleNameFor(node, role) : computeAccessibleName(node);
+  const nameValue = ax("computedString", name);
+  nameValue.sources = nameSources(options, node, role || "generic");
   const description = computeAccessibleDescription(node);
   const axNode: AXNode = {
     nodeId,
     ignored: false,
     role: roleNameValue(role || "generic"),
-    name: ax("computedString", name),
+    name: nameValue,
     description: description ? ax("computedString", description) : undefined,
     value: role ? valueFor(node, role) : undefined,
     properties: role ? propertiesFor(options, node, role) : undefined,

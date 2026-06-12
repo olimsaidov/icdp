@@ -72,6 +72,13 @@ describe("role mapping", () => {
     expect(byRole(nodes, "paragraph")?.role?.type).toBe("role"); // ARIA roles stay 'role'
   });
 
+  test("<summary> inside <details> maps to the internal DisclosureTriangle role", () => {
+    const nodes = build(`<details><summary>More</summary>body</details>`);
+    const summary = byRole(nodes, "DisclosureTriangle");
+    expect(summary?.role).toEqual({ type: "internalRole", value: "DisclosureTriangle" });
+    expect(summary?.name?.value).toBe("More");
+  });
+
   test("DIVERGENCE: chromeRole (numeric internal role) is never emitted", () => {
     const nodes = build("<button>b</button>");
     for (const node of nodes) expect(node).not.toHaveProperty("chromeRole");

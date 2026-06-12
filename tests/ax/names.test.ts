@@ -1,10 +1,16 @@
 // @vitest-environment jsdom
+import type Protocol from "devtools-protocol";
 import { afterEach, describe, expect, test } from "vitest";
 
 import { byRole } from "./_dump.ts";
 import { build, resetDocument } from "./_fixtures.ts";
 
 afterEach(resetDocument);
+
+type AXNode = ReturnType<typeof build>[number];
+function sourcesOf(node: AXNode | undefined) {
+  return (node?.name as { sources?: Protocol.Accessibility.AXValueSource[] })?.sources;
+}
 
 // Mirrors the accessibility-nameSources-* goldens at the VALUE level. The impl
 // computes names via dom-accessibility-api (the W3C AccName implementation), so
@@ -47,10 +53,52 @@ describe("accessible name computation", () => {
     expect(byRole(nodes, "main")?.name?.value ?? "").toBe("");
   });
 
-  // --- Divergence guards ---
+  // --- name.sources[] (mirrors accessibility-nameSources-buttons) ---
 
-  test("DIVERGENCE: name.sources[] array is never emitted", () => {
-    const nodes = build(`<button aria-label="x">y</button>`);
-    expect(byRole(nodes, "button")?.name).not.toHaveProperty("sources");
+  test("an empty button lists all candidate sources in order, none winning", () => {
+    const button = byRole(build(`<button></button>`), "button");
+    const sources = sourcesOf(button);
+    expect(sources?.map((s) => [s.type, s.attribute ?? s.nativeSource])).toEqual([
+      ["relatedElement", "aria-labelledby"],
+      ["attribute", "aria-label"],
+      ["relatedElement", "label"],
+      ["contents", undefined],
+      ["attribute", "title"],
+    ]);
+    expect(sources?.every((s) => s.value === undefined)).toBe(true);
+  });
+
+  test("contents wins; a later title source is marked superseded", () => {
+    const sources = sourcesOf(byRole(build(`<button>button2-content</button>`), "button"));
+    const contents = sources?.find((s) => s.type === "contents");
+    const title = sources?.find((s) => s.attribute === "title");
+    expect(contents?.value).toEqual({ type: "computedString", value: "button2-content" });
+    expect(title?.superseded).toBe(true);
+    expect(title?.value).toBeUndefined(); // title absent -> no value, just superseded
+  });
+
+  test("a superseded but present title carries attributeValue + value", () => {
+    const sources = sourcesOf(byRole(build(`<button title="t8">content8</button>`), "button"));
+    const title = sources?.find((s) => s.attribute === "title");
+    expect(title?.superseded).toBe(true);
+    expect(title?.attributeValue).toEqual({ type: "string", value: "t8" });
+    expect(title?.value).toEqual({ type: "computedString", value: "t8" });
+  });
+
+  test("aria-label wins over contents/title", () => {
+    const sources = sourcesOf(
+      byRole(build(`<button aria-label="L" title="t">content</button>`), "button"),
+    );
+    const ariaLabel = sources?.find((s) => s.attribute === "aria-label");
+    expect(ariaLabel?.value).toEqual({ type: "computedString", value: "L" });
+    expect(sources?.find((s) => s.type === "contents")?.superseded).toBe(true);
+    expect(sources?.find((s) => s.attribute === "title")?.superseded).toBe(true);
+  });
+
+  test("a dead aria-labelledby reference is marked invalid", () => {
+    const sources = sourcesOf(
+      byRole(build(`<div role="group" aria-labelledby="nope">x</div>`), "group"),
+    );
+    expect(sources?.[0]?.invalid).toBe(true);
   });
 });
