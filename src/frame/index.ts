@@ -518,6 +518,32 @@ function axTargetBackendId(params: {
   return Number.isFinite(id) && id > 0 ? id : undefined;
 }
 
+/** Strict target resolution with Chromium's AssertNode error messages. */
+function assertAXTarget(params: {
+  backendNodeId?: number;
+  nodeId?: number;
+  objectId?: string;
+}): Protocol.DOM.BackendNodeId {
+  if (params.nodeId == null && params.backendNodeId == null && params.objectId == null)
+    throw new Error("Either nodeId, backendNodeId or objectId must be specified");
+  if (params.nodeId != null) {
+    const id = Number(params.nodeId);
+    if (registry.nodeForBackendId(id)) return id;
+    throw new Error("Could not find node with given id");
+  }
+  if (params.backendNodeId != null) {
+    const id = Number(params.backendNodeId);
+    if (registry.nodeForBackendId(id)) return id;
+    throw new Error("No node found for given backend id");
+  }
+  const raw = String(params.objectId);
+  if (raw.startsWith("backend:")) {
+    const id = Number(raw.slice("backend:".length));
+    if (registry.nodeForBackendId(id)) return id;
+  }
+  throw new Error("Invalid remote object id");
+}
+
 function getFullAccessibilityTree(
   params: CdpParams<"Accessibility.getFullAXTree"> = {} as CdpParams<"Accessibility.getFullAXTree">,
 ): Protocol.Accessibility.GetFullAXTreeResponse {
@@ -552,7 +578,7 @@ function queryAccessibilityTree(
   params: CdpParams<"Accessibility.queryAXTree"> = {} as CdpParams<"Accessibility.queryAXTree">,
 ): Protocol.Accessibility.QueryAXTreeResponse {
   return queryAXTree(axOptions(), {
-    target: axTargetBackendId(params),
+    target: assertAXTarget(params),
     accessibleName: params.accessibleName,
     role: params.role,
   });

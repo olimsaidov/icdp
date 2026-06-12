@@ -1,17 +1,18 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, test } from "vitest";
 
-import { byBackendId, dumpTree, dumpTreeWithIgnored, reasonsOf } from "./_dump.ts";
-import { build, buildContext, queryRole, resetDocument } from "./_fixtures.ts";
+import { dumpTree, dumpTreeWithIgnored, reasonsOf } from "./_dump.ts";
+import { build, inspect, queryRole, resetDocument } from "./_fixtures.ts";
 
 afterEach(resetDocument);
 
-// Mirrors accessibility-ignoredNodes. Ignored nodes serialize with role:none and
-// no name on the getFullAXTree path (Chromium), so they're located by backend id.
+// Mirrors accessibility-ignoredNodes. Hidden/ignored content is mostly EXCLUDED
+// from the serialized tree (Chromium's ignored-but-included rules) and is only
+// reachable by direct inspection via getPartialAXTree(fetchRelatives: false) —
+// which is exactly how the Chromium goldens probe these nodes.
 describe("ignored nodes", () => {
   test("display:none => ignored role:none with reason notRendered, no name", () => {
-    const { nodes, backendIdFor } = buildContext(`<button style="display:none">x</button>`);
-    const button = byBackendId(nodes, backendIdFor("button"));
+    const button = inspect(`<button style="display:none">x</button>`, "button");
     expect(button?.ignored).toBe(true);
     expect(button?.role).toEqual({ type: "role", value: "none" });
     expect(button).not.toHaveProperty("name");
@@ -19,120 +20,118 @@ describe("ignored nodes", () => {
   });
 
   test("visibility:hidden => reason notVisible", () => {
-    const { nodes, backendIdFor } = buildContext(`<button style="visibility:hidden">x</button>`);
-    expect(reasonsOf(byBackendId(nodes, backendIdFor("button")))).toContain("notVisible");
+    const button = inspect(`<button style="visibility:hidden">x</button>`, "button");
+    expect(reasonsOf(button)).toContain("notVisible");
   });
 
   test("aria-hidden=true => reason ariaHiddenElement", () => {
-    const { nodes, backendIdFor } = buildContext(`<button aria-hidden="true">x</button>`);
-    expect(reasonsOf(byBackendId(nodes, backendIdFor("button")))).toContain("ariaHiddenElement");
+    const button = inspect(`<button aria-hidden="true">x</button>`, "button");
+    expect(reasonsOf(button)).toContain("ariaHiddenElement");
   });
 
   test("inert => reason inertElement", () => {
-    const { nodes, backendIdFor } = buildContext(`<button inert>x</button>`);
-    expect(reasonsOf(byBackendId(nodes, backendIdFor("button")))).toContain("inertElement");
+    const button = inspect(`<button inert>x</button>`, "button");
+    expect(reasonsOf(button)).toContain("inertElement");
   });
 
-  test("descendants of aria-hidden/inert subtrees inherit the *Subtree reason", () => {
-    const ariaHidden = buildContext(`<div aria-hidden="true"><button>x</button></div>`);
-    expect(reasonsOf(byBackendId(ariaHidden.nodes, ariaHidden.backendIdFor("button")))).toContain(
-      "ariaHiddenSubtree",
-    );
-    const inert = buildContext(`<div inert><button>x</button></div>`);
-    expect(reasonsOf(byBackendId(inert.nodes, inert.backendIdFor("button")))).toContain(
-      "inertSubtree",
-    );
+  test("aria-hidden descendants inherit ariaHiddenSubtree; inert stays inertElement", () => {
+    const hidden = inspect(`<div aria-hidden="true"><button>x</button></div>`, "button");
+    expect(reasonsOf(hidden)).toContain("ariaHiddenSubtree");
+    // Chromium reports inertElement (plain boolean) even for inherited inertness.
+    const inert = inspect(`<div inert><button>x</button></div>`, "button");
+    expect(reasonsOf(inert)).toContain("inertElement");
+    expect(inert?.ignoredReasons?.find((reason) => reason.name === "inertElement")?.value).toEqual({
+      type: "boolean",
+      value: true,
+    });
   });
 
-  test("descendants of a rendered-but-ignored subtree are preserved (ignored role:none)", () => {
-    const { nodes, backendIdFor } = buildContext(
+  test("descendants of an aria-hidden subtree stay individually inspectable", () => {
+    const button = inspect(
       `<div aria-hidden="true"><section><button>Deep</button></section></div>`,
+      "button",
     );
-    const button = byBackendId(nodes, backendIdFor("button"));
     expect(button?.ignored).toBe(true);
-    expect(button?.role).toEqual({ type: "role", value: "none" }); // getFullAXTree anonymizes ignored
+    expect(button?.role).toEqual({ type: "role", value: "none" });
     expect(reasonsOf(button)).toContain("ariaHiddenSubtree");
   });
 
-  test("queryAXTree still finds hidden elements by their real role (force_name_and_role)", () => {
-    // getFullAXTree shows the hidden button as role:none, but queryAXTree recovers
-    // its real role + name — matching Chromium.
-    const found = queryRole(`<div aria-hidden="true"><button>Deep</button></div>`, "button");
-    expect(found.map((node) => node.name?.value)).toEqual(["Deep"]);
+  test("queryAXTree only reaches hidden nodes kept in the tree (lang/label refs)", () => {
+    // content excluded from the tree is unreachable, exactly like Chromium
+    expect(queryRole(`<div aria-hidden="true"><button>Deep</button></div>`, "button")).toHaveLength(
+      0,
+    );
+    // …but hidden nodes retained in the tree (e.g. via lang) match by their
+    // real role, with the name suppressed (Chromium's ComputedName)
+    const kept = queryRole(`<h2 aria-hidden="true" lang="x">title</h2>`, "heading");
+    expect(kept).toHaveLength(1);
+    expect(kept[0]?.ignored).toBe(true);
+    expect(kept[0]?.name?.value).toBe("");
   });
 
-  test("ignored nodes carry role:none and omit the name (getFullAXTree path)", () => {
-    const { nodes, backendIdFor } = buildContext(`<button aria-hidden="true">Save</button>`);
-    const button = byBackendId(nodes, backendIdFor("button"));
+  test("ignored nodes carry role:none and omit the name (direct inspection)", () => {
+    const button = inspect(`<button aria-hidden="true">Save</button>`, "button");
     expect(button?.role).toEqual({ type: "role", value: "none" });
     expect(button).not.toHaveProperty("name");
   });
 
   test("an element-variant reason value is a plain boolean", () => {
-    const { nodes, backendIdFor } = buildContext(`<button aria-hidden="true">x</button>`);
-    for (const reason of byBackendId(nodes, backendIdFor("button"))?.ignoredReasons ?? [])
+    const button = inspect(`<button aria-hidden="true">x</button>`, "button");
+    for (const reason of button?.ignoredReasons ?? [])
       expect(reason.value).toEqual({ type: "boolean", value: true });
   });
 
   test("an ancestor-derived reason carries a relatedNodes idref to the offending ancestor", () => {
-    const { nodes, backendIdFor } = buildContext(
-      `<div aria-hidden="true"><button>x</button></div>`,
-    );
-    const reason = byBackendId(nodes, backendIdFor("button"))?.ignoredReasons?.find(
-      (r) => r.name === "ariaHiddenSubtree",
-    );
+    const button = inspect(`<div id="veil" aria-hidden="true"><button>x</button></div>`, "button");
+    const reason = button?.ignoredReasons?.find((r) => r.name === "ariaHiddenSubtree");
     expect(reason?.value.type).toBe("idref");
-    expect(reason?.value.relatedNodes?.[0]?.backendDOMNodeId).toBe(backendIdFor("div"));
+    expect(reason?.value.relatedNodes?.[0]?.idref).toBe("veil");
   });
 
-  test("ignored text is anonymized to role:none on getFullAXTree (no StaticText leaks the text)", () => {
+  test("aria-hidden subtrees are excluded from the tree entirely (text never leaks)", () => {
     const nodes = build(`<div aria-hidden="true">secret</div>`);
-    expect(nodes.some((n) => n.role?.value === "StaticText" && n.name?.value === "secret")).toBe(
-      false,
+    expect(nodes.some((n) => n.name?.value === "secret")).toBe(false);
+    // the hidden div is not in the tree at all — only direct inspection reaches it
+    expect(nodes.some((n) => reasonsOf(n).includes("ariaHiddenElement"))).toBe(false);
+    expect(reasonsOf(inspect(`<div aria-hidden="true">secret</div>`, "div"))).toContain(
+      "ariaHiddenElement",
     );
-    expect(nodes.some((n) => n.ignored && n.role?.value === "none")).toBe(true);
   });
 
   test("explicit role=presentation => ignored presentationalRole, inherited by list items", () => {
-    const { nodes, backendIdFor } = buildContext(`<ul role="presentation"><li>x</li></ul>`);
-    expect(reasonsOf(byBackendId(nodes, backendIdFor("ul")))).toContain("presentationalRole");
-    expect(reasonsOf(byBackendId(nodes, backendIdFor("li")))).toContain("presentationalRole");
+    const html = `<ul role="presentation"><li>x</li></ul>`;
+    expect(reasonsOf(inspect(html, "ul"))).toContain("presentationalRole");
+    expect(reasonsOf(inspect(html, "li"))).toContain("presentationalRole");
   });
 
   test("role=presentation on a plain container does NOT make its children presentational", () => {
-    const { nodes, backendIdFor } = buildContext(
-      `<div role="presentation"><button>x</button></div>`,
-    );
-    const button = byBackendId(nodes, backendIdFor("button"));
-    expect(button?.ignored ?? false).toBe(false);
-    expect(button?.role?.value).toBe("button");
+    const nodes = build(`<div role="presentation"><button>x</button></div>`);
+    const button = nodes.find((node) => node.role?.value === "button");
+    expect(button?.ignored).toBe(false);
+    expect(button?.name?.value).toBe("x");
   });
 
   test("the hidden attribute maps to notRendered (Chromium has no bespoke 'hidden' reason)", () => {
-    const { nodes, backendIdFor } = buildContext(`<button hidden>x</button>`);
-    const reasons = reasonsOf(byBackendId(nodes, backendIdFor("button")));
+    const reasons = reasonsOf(inspect(`<button hidden>x</button>`, "button"));
     expect(reasons).toContain("notRendered");
     expect(reasons).not.toContain("hidden");
   });
 
-  test("ignored subtree topology is visible in the non-splicing dump", () => {
-    const nodes = build(
-      `<main><button aria-hidden="true">Hidden</button><button>Shown</button></main>`,
-    );
+  test("ignored wrapper topology is visible in the non-splicing dump", () => {
+    const nodes = build(`<main><span>wrapped</span><button>Shown</button></main>`);
+    // html and body serialize as ignored role:none (uninteresting); the span is
+    // excluded and its text hoists into <main>.
     expect("\n" + dumpTreeWithIgnored(nodes) + "\n").toMatchInlineSnapshot(`
       "
       RootWebArea "Fixture"
-        document
+        (ignored) none
           (ignored) none
-          main
-            (ignored) none
-              (ignored) none
-            button "Shown"
-              StaticText "Shown"
+            main
+              StaticText "wrapped"
+              button "Shown"
+                StaticText "Shown"
       "
     `);
-    // The splicing dump (Chromium getFullAXTree style) hides the ignored button.
-    expect(dumpTree(nodes)).not.toContain("Hidden");
     expect(dumpTree(nodes)).toContain("Shown");
   });
 });

@@ -22,12 +22,14 @@ describe("method surface", () => {
     expect(node.parentId).toBeUndefined();
   });
 
-  test("getChildAXNodes returns the direct children of an AX node", () => {
+  test("getChildAXNodes follows ignored children one extra layer (Chromium AddChildren)", () => {
     const { options } = buildContext(`<main><button>Go</button></main>`);
     const root = getRootAXNode(options).node;
     const children = getChildAXNodes(options, root.nodeId).nodes;
-    expect(children.length).toBe((root.childIds ?? []).length);
-    expect(children.every((child) => child.parentId === root.nodeId)).toBe(true);
+    // the root's direct child is the ignored <html>; ignored wrappers are
+    // emitted AND followed through, surfacing <main> in the same response
+    expect(children[0]?.nodeId).toBe(root.childIds?.[0]);
+    expect(children.some((child) => child.role?.value === "main")).toBe(true);
   });
 
   test("getAXNodeAndAncestors returns the node up through the root", () => {

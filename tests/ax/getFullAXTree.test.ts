@@ -20,21 +20,21 @@ describe("Accessibility.getFullAXTree", () => {
         `<div>anon wrapper</div>` +
         `</main>`,
     );
-    // Divergences baked into this golden vs Chromium:
-    //  - NO `InlineTextBox` leaf under each StaticText (impl never emits them).
-    //  - the anonymous <div> is collapsed (generic-collapse) and its text promoted.
+    // The only divergence baked into this golden vs Chromium: NO `InlineTextBox`
+    // leaf under each StaticText (a layout-engine ceiling; never emitted).
+    // html/body are ignored wrappers (spliced out of this dump) and the
+    // anonymous <div> serializes as an unignored `generic` node, both Chromium-exact.
     expect("\n" + dumpTree(nodes) + "\n").toMatchInlineSnapshot(`
       "
       RootWebArea "Fixture"
-        document
-
-          main
-            heading "Title"
-              StaticText "Title"
-            link "A link"
-              StaticText "A link"
-            button "Go"
-              StaticText "Go"
+        main
+          heading "Title"
+            StaticText "Title"
+          link "A link"
+            StaticText "A link"
+          button "Go"
+            StaticText "Go"
+          generic
             StaticText "anon wrapper"
       "
     `);
@@ -43,7 +43,8 @@ describe("Accessibility.getFullAXTree", () => {
   test("RootWebArea carries the document title as its name", () => {
     const nodes = build("<p>hi</p>", "Page Title");
     const root = byRole(nodes, "RootWebArea");
-    expect(root?.name).toEqual({ type: "computedString", value: "Page Title" });
+    expect(root?.name?.type).toBe("computedString");
+    expect(root?.name?.value).toBe("Page Title");
   });
 
   test("nodes form a single rooted tree addressed by childIds", () => {
@@ -77,8 +78,10 @@ describe("Accessibility.getFullAXTree", () => {
   test("RootWebArea backendDOMNodeId targets the Document, not <html>", () => {
     const nodes = build("<p>hi</p>");
     const root = byRole(nodes, "RootWebArea");
-    const htmlNode = byRole(nodes, "document"); // the <html> element's own node
+    // <html> serializes as an ignored role:none child of the root
+    const htmlNode = nodes.find((node) => node.parentId === root?.nodeId);
     expect(typeof root?.backendDOMNodeId).toBe("number");
+    expect(htmlNode?.ignored).toBe(true);
     // distinct from the documentElement's backend id
     expect(root?.backendDOMNodeId).not.toBe(htmlNode?.backendDOMNodeId);
   });
@@ -91,6 +94,10 @@ describe("Accessibility.getFullAXTree", () => {
       {
         "backendDOMNodeId": "<number>",
         "childIds": "<object>",
+        "chromeRole": {
+          "type": "internalRole",
+          "value": 9,
+        },
         "ignored": false,
         "name": {
           "sources": [
@@ -125,6 +132,13 @@ describe("Accessibility.getFullAXTree", () => {
         "nodeId": "<string>",
         "parentId": "<string>",
         "properties": [
+          {
+            "name": "invalid",
+            "value": {
+              "type": "token",
+              "value": "false",
+            },
+          },
           {
             "name": "focusable",
             "value": {

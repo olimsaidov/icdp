@@ -79,8 +79,15 @@ describe("role mapping", () => {
     expect(summary?.name?.value).toBe("More");
   });
 
-  test("DIVERGENCE: chromeRole (numeric internal role) is never emitted", () => {
-    const nodes = build("<button>b</button>");
-    for (const node of nodes) expect(node).not.toHaveProperty("chromeRole");
+  test("chromeRole carries the stable ax::mojom::Role ordinal on every node", () => {
+    const nodes = build("<button>b</button>") as Array<{
+      chromeRole?: { type: string; value: number };
+      role?: { value: string };
+    }>;
+    for (const node of nodes) {
+      expect(node.chromeRole?.type).toBe("internalRole");
+      expect(typeof node.chromeRole?.value).toBe("number");
+    }
+    expect(nodes.find((node) => node.role?.value === "button")?.chromeRole?.value).toBe(9);
   });
 });

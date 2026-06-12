@@ -34,19 +34,25 @@ describe("tree structure", () => {
 
   // --- Divergence guards ---
 
-  test("DIVERGENCE: an anonymous unnamed <div> is collapsed (Chromium keeps a generic node)", () => {
+  test("an anonymous unnamed block <div> is an unignored generic node (Chromium parity)", () => {
     const nodes = build(`<main><div><button>x</button></div></main>`);
-    // The wrapper div has no role and no name -> collapsed, button hoisted under main.
     const main = byRole(nodes, "main");
+    const wrapper = byRole(nodes, "generic");
     const button = byRole(nodes, "button");
-    expect(button?.parentId).toBe(main?.nodeId);
+    expect(wrapper?.parentId).toBe(main?.nodeId);
+    expect(button?.parentId).toBe(wrapper?.nodeId);
+  });
+
+  test("an unnamed inline <span> is excluded; its text hoists to the parent", () => {
+    const nodes = build(`<main><span>wrapped</span></main>`);
+    const main = byRole(nodes, "main");
+    const text = byRole(nodes, "StaticText");
+    expect(text?.parentId).toBe(main?.nodeId);
+    expect(byRole(nodes, "generic")).toBeUndefined();
   });
 
   test("RootWebArea name is the document title, empty when untitled (no href fallback)", () => {
-    expect(byRole(build(`<p>x</p>`, ""), "RootWebArea")?.name).toEqual({
-      type: "computedString",
-      value: "",
-    });
+    expect(byRole(build(`<p>x</p>`, ""), "RootWebArea")?.name?.value).toBe("");
     expect(byRole(build(`<p>x</p>`, "My Page"), "RootWebArea")?.name?.value).toBe("My Page");
   });
 

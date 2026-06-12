@@ -4,6 +4,7 @@ import {
   createDomRegistry,
   type DomRegistry,
   getFullAXTree,
+  getPartialAXTree,
   queryAXTree,
 } from "../../src/frame/ax-tree.ts";
 
@@ -76,6 +77,18 @@ export function buildContext(
 export function queryRole(html: string, role: string, title = "Fixture"): AXNode[] {
   const { options } = buildContext(html, title);
   return queryAXTree(options, { role }).nodes;
+}
+
+/**
+ * Build a fixture and directly inspect one element via
+ * `getPartialAXTree(fetchRelatives: false)` — the only way to reach nodes that
+ * are excluded from the tree (hidden/ignored content), mirroring how
+ * Chromium's golden tests probe them.
+ */
+export function inspect(html: string, selector: string, title = "Fixture"): AXNode | undefined {
+  const { options, backendIdFor } = buildContext(html, title);
+  const { nodes } = getPartialAXTree(options, backendIdFor(selector), false);
+  return JSON.parse(JSON.stringify(nodes))[0] as AXNode | undefined;
 }
 
 /** Reset the document between tests so fixtures don't leak into one another. */

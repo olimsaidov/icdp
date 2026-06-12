@@ -33,17 +33,15 @@ describe("list markers", () => {
     expect("\n" + dumpTree(nodes) + "\n").toMatchInlineSnapshot(`
       "
       RootWebArea "Fixture"
-        document
-
-          list
-            listitem
-              ListMarker "1. "
-                StaticText "1. "
-              StaticText "alpha"
-            listitem
-              ListMarker "2. "
-                StaticText "2. "
-              StaticText "beta"
+        list
+          listitem
+            ListMarker "1. "
+              StaticText "1. "
+            StaticText "alpha"
+          listitem
+            ListMarker "2. "
+              StaticText "2. "
+            StaticText "beta"
       "
     `);
   });
