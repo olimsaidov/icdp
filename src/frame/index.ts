@@ -382,24 +382,6 @@ function wrapConsoleMethod(fn: ConsoleMethod, type: string): ConsoleMethod {
   return wrapped;
 }
 
-function highlight(el: Element): void {
-  const rect = el.getBoundingClientRect();
-  const marker = document.createElement("div");
-  marker.style.cssText = [
-    "position:fixed",
-    `left:${rect.left}px`,
-    `top:${rect.top}px`,
-    `width:${rect.width}px`,
-    `height:${rect.height}px`,
-    "z-index:2147483647",
-    "pointer-events:none",
-    "outline:2px solid #005fb8",
-    "background:rgba(0,95,184,.08)",
-  ].join(";");
-  document.documentElement.appendChild(marker);
-  setTimeout(() => marker.remove(), 500);
-}
-
 function setNativeValue(el: HTMLInputElement | HTMLTextAreaElement, value: string): void {
   const proto =
     el instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
@@ -414,7 +396,6 @@ function canSelectText(el: HTMLInputElement): boolean {
 function insertText(text: string): void {
   const el = document.activeElement as HTMLElement | null;
   if (!el) return;
-  highlight(el);
   if (el instanceof HTMLInputElement && !canSelectText(el)) {
     setNativeValue(el, text);
     el.dispatchEvent(
