@@ -6,13 +6,13 @@ Chrome DevTools Protocol over an iframe boundary. External CDP tools (agent-brow
 agent-browser / CDP client
         │  WebSocket (standard CDP, flat sessions)
         ▼
-      Relay   ←  icdp/relay (+ icdp/relay/node)     server
+      Relay   ←  @olimsaidov/icdp/relay  (+ /relay/node)   server
         │  WebSocket (bridge protocol)
         ▼
-      Host    ←  icdp/host                          parent window
+      Host    ←  @olimsaidov/icdp/host                     parent window
         │  MessagePort (per iframe)
         ▼
-  Frame Agent ←  icdp/frame                         inside the iframe'd app
+  Frame Agent ←  @olimsaidov/icdp/frame                    inside the iframe'd app
 ```
 
 See `CONTEXT.md` for the project language (Frame Agent, Host, Relay, Client, Target, Pairing) and `docs/adr/` for architectural decisions.
@@ -24,7 +24,7 @@ See `CONTEXT.md` for the project language (Frame Agent, Host, Relay, Client, Tar
 The app under automation includes the agent itself (cooperative embedding — the Host never injects):
 
 ```ts
-import { startFrameAgent } from "icdp/frame";
+import { startFrameAgent } from "@olimsaidov/icdp/frame";
 
 startFrameAgent({ allowedParents: ["https://shell.example.com"] });
 ```
@@ -34,7 +34,7 @@ The agent announces itself to the parent on boot and stays dormant unless the pa
 ### Host — in the parent window
 
 ```ts
-import { IcdpHost } from "icdp/host";
+import { IcdpHost } from "@olimsaidov/icdp/host";
 
 const host = new IcdpHost();
 host.pair(iframeElement, { targetId: "preview", origins: ["https://app.example.com"] });
@@ -55,14 +55,14 @@ Target identity belongs to the Pairing: reloads and navigations keep the same `t
 ### Relay — the server
 
 ```ts
-import { serveRelay } from "icdp/relay/node";
+import { serveRelay } from "@olimsaidov/icdp/relay/node";
 
 const relay = await serveRelay({ port: 9222 });
 console.log(relay.browserWsUrl); // ws://127.0.0.1:9222/devtools/browser  ← CDP clients
 console.log(relay.hostWsUrl); // ws://127.0.0.1:9222/icdp/host         ← Host uplink
 ```
 
-The Node adapter is built on `node:http` + `ws`. The runtime-agnostic core (`icdp/relay` → `RelayCore`) takes plain `{ send, close }` sockets, so other runtimes only need a thin adapter. HTTP discovery: `/json/version`, `/json/list`, `/icdp/status`.
+The Node adapter is built on `node:http` + `ws`. The runtime-agnostic core (`@olimsaidov/icdp/relay` → `RelayCore`) takes plain `{ send, close }` sockets, so other runtimes only need a thin adapter. HTTP discovery: `/json/version`, `/json/list`, `/icdp/status`.
 
 One Host per Relay, new-wins: a newly connecting Host replaces a stale one, with `targetDestroyed`/`targetCreated` churn surfaced to attached Clients.
 
