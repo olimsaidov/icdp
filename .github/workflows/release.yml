@@ -50,4 +50,8 @@ jobs:
       - run: npm run check
       - run: npm test
       - run: npm run build
-      - run: npm publish
+      - name: Check OIDC availability
+        run: |
+          echo "id-token request URL present: ${ACTIONS_ID_TOKEN_REQUEST_URL:+yes}"
+          echo "id-token request token present: ${ACTIONS_ID_TOKEN_REQUEST_TOKEN:+yes}"
+      - run: npm publish --loglevel verbose
