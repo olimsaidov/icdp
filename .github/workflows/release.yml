@@ -1,0 +1,39 @@
+name: Release
+
+# Publish @olimsaidov/icdp to npm when a GitHub Release is published, using npm
+# "trusted publishing" (OIDC) — no NPM_TOKEN secret. npm exchanges this
+# workflow's short-lived OIDC token for a publish token and attaches build
+# provenance automatically.
+#
+# Configure on npmjs.com → package settings → Trusted Publisher:
+#   Publisher: GitHub Actions · Org/user: olimsaidov · Repo: icdp
+#   Workflow filename: release.yml
+#
+# To cut a release: bump "version" in package.json, commit, then publish a
+# GitHub Release whose tag matches (e.g. v0.1.1).
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # required for npm trusted publishing + provenance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing requires npm >= 11.5.1.
+      - run: npm install -g npm@latest
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+      - run: npm publish
