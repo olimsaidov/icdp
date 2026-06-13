@@ -26,10 +26,13 @@ jobs:
       id-token: write # required for npm trusted publishing + provenance
     steps:
       - uses: actions/checkout@v4
+      # NB: no `registry-url` — it makes setup-node write an .npmrc with a
+      # placeholder NODE_AUTH_TOKEN + always-auth, which forces (failing) token
+      # auth and blocks the OIDC exchange. The registry comes from the checked-in
+      # .npmrc (@olimsaidov → npmjs) + publishConfig instead.
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          registry-url: https://registry.npmjs.org
       - name: Verify release tag matches package.json version
         run: |
           tag="${GITHUB_REF_NAME#v}"
@@ -39,8 +42,10 @@ jobs:
             exit 1
           fi
           echo "Releasing v$pkg"
-      # Trusted publishing requires npm >= 11.5.1.
+      # Trusted publishing (OIDC) requires npm >= 11.5.1; node 24 bundles an
+      # older npm, so upgrade.
       - run: npm install -g npm@latest
+      - run: npm --version
       - run: npm ci
       - run: npm run check
       - run: npm test
