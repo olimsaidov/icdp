@@ -70,7 +70,15 @@ export function isHandshakeMessage(data: unknown): data is HandshakeMessage {
 // ---------------------------------------------------------------------------
 
 /** Host -> Relay: announces itself and its current targets. New-wins: the Relay drops any previous Host. */
-export type BridgeReady = { kind: "ready"; v: number; targets: TargetSummary[] };
+export type BridgeReady = {
+  kind: "ready";
+  v: number;
+  targets: TargetSummary[];
+  /** Browser-level methods (e.g. "Target.createTarget") the Host handles itself.
+   *  The Relay forwards these as a BridgeBrowserRequest instead of using its
+   *  built-in default; omitted/empty means the Relay keeps its defaults. */
+  handles?: string[];
+};
 /** Host -> Relay: a Pairing appeared. */
 export type BridgeTargetCreated = { kind: "targetCreated"; target: TargetSummary };
 /** Host -> Relay: a Pairing was destroyed by the Host. */
@@ -103,6 +111,21 @@ export type BridgeEvent = {
 };
 /** Relay -> Host: a session detached (Client disconnected or detached explicitly). */
 export type BridgeDetached = { kind: "detached"; sessionId: string; targetId: string };
+/** Relay -> Host: a browser-level method the Host advertised it handles
+ *  (e.g. Target.createTarget / Target.closeTarget). Not session-scoped. */
+export type BridgeBrowserRequest = {
+  kind: "browserRequest";
+  id: number;
+  method: string;
+  params: Record<string, unknown>;
+};
+/** Host -> Relay: the response to a BridgeBrowserRequest. */
+export type BridgeBrowserResult = {
+  kind: "browserResult";
+  id: number;
+  result?: unknown;
+  error?: CdpError;
+};
 
 export type HostToRelayMessage =
   | BridgeReady
@@ -110,9 +133,10 @@ export type HostToRelayMessage =
   | BridgeTargetDestroyed
   | BridgeTargetInfoChanged
   | BridgeResponse
-  | BridgeEvent;
+  | BridgeEvent
+  | BridgeBrowserResult;
 
-export type RelayToHostMessage = BridgeCommand | BridgeDetached;
+export type RelayToHostMessage = BridgeCommand | BridgeDetached | BridgeBrowserRequest;
 
 export function parseJson<T>(raw: string | Buffer | ArrayBuffer | Uint8Array): T | null {
   try {

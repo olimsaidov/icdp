@@ -1,6 +1,11 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
-import type { CdpMessage, HostToRelayMessage, RelayToHostMessage } from "../src/protocol.ts";
+import type {
+  BridgeBrowserRequest,
+  CdpMessage,
+  HostToRelayMessage,
+  RelayToHostMessage,
+} from "../src/protocol.ts";
 import { RelayCore, type SocketLike } from "../src/relay/core.ts";
 
 type FakeSocket = SocketLike & {
@@ -39,6 +44,25 @@ function setup() {
       kind: "ready",
       v: 1,
       targets: [{ targetId: "preview", title: "Preview", url: "http://app.test/" }],
+    } satisfies HostToRelayMessage),
+  );
+  const client = fakeSocket();
+  core.clientConnected(client);
+  return { core, host, client };
+}
+
+/** Like setup(), but the Host advertises browser-level methods it handles itself. */
+function setupWithHandles(handles: string[]) {
+  const core = new RelayCore({ product: "icdp-test", browserWsUrl: "ws://test/devtools/browser" });
+  const host = fakeSocket();
+  core.hostConnected(host);
+  core.hostMessage(
+    host,
+    JSON.stringify({
+      kind: "ready",
+      v: 1,
+      targets: [{ targetId: "preview", title: "Preview", url: "http://app.test/" }],
+      handles,
     } satisfies HostToRelayMessage),
   );
   const client = fakeSocket();
@@ -250,5 +274,256 @@ describe("host lifecycle", () => {
     expect(
       client.sent.filter((message) => message.method === "Target.attachedToTarget").length,
     ).toBe(2);
+  });
+});
+
+describe("host-handled lifecycle methods", () => {
+  test("createTarget is forwarded to the host when advertised", () => {
+    const { core, host, client } = setupWithHandles(["Target.createTarget"]);
+    core.clientMessage(
+      client,
+      JSON.stringify({
+        id: 11,
+        method: "Target.createTarget",
+        params: { url: "http://app.test/new" },
+      }),
+    );
+
+    // It must not be answered locally — instead a browserRequest goes to the Host.
+    expect(client.sent).toHaveLength(0);
+    const request = hostSent(host).at(-1);
+    if (request?.kind !== "browserRequest") throw new Error("expected a browserRequest");
+    expect(request.method).toBe("Target.createTarget");
+    expect(request.params).toEqual({ url: "http://app.test/new" });
+
+    core.hostMessage(
+      host,
+      JSON.stringify({
+        kind: "browserResult",
+        id: request.id,
+        result: { targetId: "tab-2" },
+      } satisfies HostToRelayMessage),
+    );
+    const response = lastResponse(client);
+    expect(response.id).toBe(11);
+    expect(response.result).toEqual({ targetId: "tab-2" });
+    // Browser-level results are not session-scoped.
+    expect(response.sessionId).toBeUndefined();
+  });
+
+  test("createTarget falls back to the built-in error when not advertised", () => {
+    const { core, host, client } = setup();
+    core.clientMessage(
+      client,
+      JSON.stringify({ id: 12, method: "Target.createTarget", params: {} }),
+    );
+    expect(hostSent(host).some((message) => message.kind === "browserRequest")).toBe(false);
+    const response = lastResponse(client);
+    expect(response.id).toBe(12);
+    expect(response.error?.message).toContain("not supported");
+  });
+
+  test("a host-rejected createTarget surfaces as a client error", () => {
+    const { core, host, client } = setupWithHandles(["Target.createTarget"]);
+    core.clientMessage(
+      client,
+      JSON.stringify({ id: 13, method: "Target.createTarget", params: {} }),
+    );
+    const request = hostSent(host).at(-1);
+    if (request?.kind !== "browserRequest") throw new Error("expected a browserRequest");
+    core.hostMessage(
+      host,
+      JSON.stringify({
+        kind: "browserResult",
+        id: request.id,
+        error: { code: -32000, message: "popups disabled" },
+      } satisfies HostToRelayMessage),
+    );
+    const response = lastResponse(client);
+    expect(response.id).toBe(13);
+    expect(response.error?.message).toBe("popups disabled");
+  });
+
+  test("closeTarget is forwarded to the host when advertised", () => {
+    const { core, host, client } = setupWithHandles(["Target.closeTarget"]);
+    core.clientMessage(
+      client,
+      JSON.stringify({ id: 14, method: "Target.closeTarget", params: { targetId: "preview" } }),
+    );
+    const request = hostSent(host).at(-1);
+    if (request?.kind !== "browserRequest") throw new Error("expected a browserRequest");
+    expect(request.method).toBe("Target.closeTarget");
+    expect(request.params).toEqual({ targetId: "preview" });
+
+    core.hostMessage(
+      host,
+      JSON.stringify({
+        kind: "browserResult",
+        id: request.id,
+        result: { success: true },
+      } satisfies HostToRelayMessage),
+    );
+    expect(lastResponse(client).result).toEqual({ success: true });
+  });
+
+  test("closeTarget keeps its built-in success default when not advertised", () => {
+    const { core, host, client } = setup();
+    core.clientMessage(
+      client,
+      JSON.stringify({ id: 15, method: "Target.closeTarget", params: { targetId: "preview" } }),
+    );
+    expect(hostSent(host).some((message) => message.kind === "browserRequest")).toBe(false);
+    const response = lastResponse(client);
+    expect(response.id).toBe(15);
+    // CDP's Target.closeTarget returns { success }, not {}.
+    expect(response.result).toEqual({ success: true });
+  });
+
+  test("host disconnect fails an in-flight browser request", () => {
+    const { core, host, client } = setupWithHandles(["Target.createTarget"]);
+    core.clientMessage(
+      client,
+      JSON.stringify({ id: 16, method: "Target.createTarget", params: {} }),
+    );
+    expect(hostSent(host).at(-1)?.kind).toBe("browserRequest");
+
+    core.hostDisconnected(host);
+    const response = lastResponse(client);
+    expect(response.id).toBe(16);
+    expect(response.error?.message).toContain("Host disconnected");
+  });
+
+  test("a browserResult for an unknown id is ignored", () => {
+    const { core, host, client } = setupWithHandles(["Target.createTarget"]);
+    core.hostMessage(
+      host,
+      JSON.stringify({ kind: "browserResult", id: 999, result: {} } satisfies HostToRelayMessage),
+    );
+    expect(client.sent).toHaveLength(0);
+  });
+
+  test("concurrent createTargets correlate by bridge id regardless of reply order", () => {
+    const { core, host, client } = setupWithHandles(["Target.createTarget"]);
+    core.clientMessage(
+      client,
+      JSON.stringify({ id: 21, method: "Target.createTarget", params: { url: "a" } }),
+    );
+    core.clientMessage(
+      client,
+      JSON.stringify({ id: 22, method: "Target.createTarget", params: { url: "b" } }),
+    );
+    const requests = hostSent(host).filter(
+      (message): message is BridgeBrowserRequest => message.kind === "browserRequest",
+    );
+    const [first, second] = requests;
+    if (!first || !second) throw new Error("expected two browserRequests");
+    expect(first.id).not.toBe(second.id);
+
+    // Answer the SECOND request first — correlation must be by bridge id, not order.
+    core.hostMessage(
+      host,
+      JSON.stringify({
+        kind: "browserResult",
+        id: second.id,
+        result: { targetId: "b" },
+      } satisfies HostToRelayMessage),
+    );
+    core.hostMessage(
+      host,
+      JSON.stringify({
+        kind: "browserResult",
+        id: first.id,
+        result: { targetId: "a" },
+      } satisfies HostToRelayMessage),
+    );
+
+    const byClientId = new Map(
+      client.sent
+        .filter((message) => message.id != null)
+        .map((message) => [message.id, message.result]),
+    );
+    expect(byClientId.get(22)).toEqual({ targetId: "b" });
+    expect(byClientId.get(21)).toEqual({ targetId: "a" });
+  });
+
+  test("a session-scoped createTarget is still forwarded to the host", () => {
+    const { core, host, client } = setupWithHandles(["Target.createTarget"]);
+    const sessionId = attach(core, client);
+    core.clientMessage(
+      client,
+      JSON.stringify({ id: 31, sessionId, method: "Target.createTarget", params: {} }),
+    );
+    const request = hostSent(host).at(-1);
+    if (request?.kind !== "browserRequest") throw new Error("expected a browserRequest");
+    expect(request.method).toBe("Target.createTarget");
+
+    core.hostMessage(
+      host,
+      JSON.stringify({
+        kind: "browserResult",
+        id: request.id,
+        result: { targetId: "tab-9" },
+      } satisfies HostToRelayMessage),
+    );
+    const response = lastResponse(client);
+    expect(response.id).toBe(31);
+    expect(response.result).toEqual({ targetId: "tab-9" });
+    // The Client scoped it to a session, so echo that sessionId back.
+    expect(response.sessionId).toBe(sessionId);
+  });
+
+  test("client disconnect drops its in-flight browser request", () => {
+    const { core, host, client } = setupWithHandles(["Target.createTarget"]);
+    core.clientMessage(
+      client,
+      JSON.stringify({ id: 41, method: "Target.createTarget", params: {} }),
+    );
+    const request = hostSent(host).at(-1);
+    if (request?.kind !== "browserRequest") throw new Error("expected a browserRequest");
+
+    core.clientDisconnected(client);
+    const before = client.sent.length;
+    // A late result for the dropped request must be ignored (the entry is gone).
+    core.hostMessage(
+      host,
+      JSON.stringify({
+        kind: "browserResult",
+        id: request.id,
+        result: {},
+      } satisfies HostToRelayMessage),
+    );
+    expect(client.sent.length).toBe(before);
+  });
+
+  test("a browser request times out if the host never answers", () => {
+    vi.useFakeTimers();
+    try {
+      const core = new RelayCore({ browserRequestTimeoutMs: 50 });
+      const host = fakeSocket();
+      core.hostConnected(host);
+      core.hostMessage(
+        host,
+        JSON.stringify({
+          kind: "ready",
+          v: 1,
+          targets: [],
+          handles: ["Target.createTarget"],
+        } satisfies HostToRelayMessage),
+      );
+      const client = fakeSocket();
+      core.clientConnected(client);
+      core.clientMessage(
+        client,
+        JSON.stringify({ id: 51, method: "Target.createTarget", params: {} }),
+      );
+      expect(hostSent(host).at(-1)?.kind).toBe("browserRequest");
+
+      vi.advanceTimersByTime(50);
+      const response = lastResponse(client);
+      expect(response.id).toBe(51);
+      expect(response.error?.message).toContain("did not respond");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -86,15 +86,40 @@ function methodDomain(method: string): string {
   return method.split(".")[0] ?? method;
 }
 
+/** Params of a CDP Target.createTarget request handed to onCreateTarget. */
+export type CreateTargetParams = { url?: string } & Record<string, unknown>;
+
+export type IcdpHostOptions = {
+  /** The window to listen on (defaults to the global `window`). */
+  window?: WindowLike;
+  /**
+   * Handle a Client's `Target.createTarget`: create + `pair()` an iframe and
+   * return its `targetId`. The Relay's response resolves only after the new
+   * Target connects, so the Client's first commands land. Throw to reject.
+   */
+  onCreateTarget?: (params: CreateTargetParams) => string | Promise<string>;
+  /**
+   * Handle a Client's `Target.closeTarget`: tear the Target down (e.g.
+   * `unpair()` + remove the iframe). Throw to reject.
+   */
+  onCloseTarget?: (targetId: string) => void | Promise<void>;
+};
+
 export class IcdpHost {
   private readonly pairings = new Map<string, Pairing>();
   private readonly targetListeners = new Set<(event: TargetEvent) => void>();
   private nextLocalSession = 1;
   private uplink: RelayUplink | null = null;
+  private readonly win: WindowLike;
+  private readonly options: IcdpHostOptions;
   private readonly onWindowMessage = (event: MessageEvent) => this.handleWindowMessage(event);
 
-  constructor(private readonly win: WindowLike = window) {
-    win.addEventListener("message", this.onWindowMessage);
+  constructor(optionsOrWindow: IcdpHostOptions | WindowLike = {}) {
+    // Back-compat: a bare WindowLike (has addEventListener) is still accepted.
+    this.options =
+      "addEventListener" in optionsOrWindow ? { window: optionsOrWindow } : optionsOrWindow;
+    this.win = this.options.window ?? window;
+    this.win.addEventListener("message", this.onWindowMessage);
   }
 
   /** Register an iframe slot as a Target. The Pairing owns target identity. */
@@ -179,6 +204,67 @@ export class IcdpHost {
       this.uplink?.close();
       this.uplink = null;
     };
+  }
+
+  /** Browser-level methods this Host handles, advertised to the Relay so it
+   *  forwards them instead of using its built-in default. */
+  handledMethods(): string[] {
+    const methods: string[] = [];
+    if (this.options.onCreateTarget) methods.push("Target.createTarget");
+    if (this.options.onCloseTarget) methods.push("Target.closeTarget");
+    return methods;
+  }
+
+  /** Run a browser-level method the Host advertised (invoked by the Relay
+   *  uplink). The resolved value, or a thrown error, becomes the Client's
+   *  response. createTarget resolves only once the new Target connects. */
+  async handleBrowserRequest(method: string, params: Record<string, unknown>): Promise<unknown> {
+    if (method === "Target.createTarget") {
+      if (!this.options.onCreateTarget) throw new Error(`${method} is not handled by this Host`);
+      const targetId = await this.options.onCreateTarget(params as CreateTargetParams);
+      try {
+        await this.whenConnected(targetId);
+      } catch (error) {
+        // The Target never materialised (timed out, or destroyed mid-handshake).
+        // Tear down the half-created Pairing so it doesn't linger as a zombie in
+        // the Host, the Relay, and Target.getTargets. unpair() is idempotent.
+        this.unpair(targetId);
+        throw error;
+      }
+      return { targetId };
+    }
+    if (method === "Target.closeTarget") {
+      if (!this.options.onCloseTarget) throw new Error(`${method} is not handled by this Host`);
+      await this.options.onCloseTarget(String(params.targetId ?? ""));
+      return { success: true };
+    }
+    throw new Error(`Unhandled browser method: ${method}`);
+  }
+
+  /** Resolve once a paired Target completes its handshake (targetInfoChanged);
+   *  reject if it is destroyed first or does not connect within the timeout. */
+  private whenConnected(targetId: string, timeoutMs = 10_000): Promise<void> {
+    const pairing = this.pairings.get(targetId);
+    if (!pairing) return Promise.reject(new Error(`Unknown target "${targetId}"`));
+    if (pairing.connected) return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const off = this.onTargets((event) => {
+        if (event.kind === "targetInfoChanged" && event.target.targetId === targetId) {
+          clearTimeout(timer);
+          off();
+          resolve();
+        } else if (event.kind === "targetDestroyed" && event.targetId === targetId) {
+          clearTimeout(timer);
+          off();
+          reject(new Error(`Target "${targetId}" was destroyed before connecting`));
+        }
+      });
+      timer = setTimeout(() => {
+        off();
+        reject(new Error(`Target "${targetId}" did not connect within ${timeoutMs}ms`));
+      }, timeoutMs);
+    });
   }
 
   destroy(): void {
@@ -354,7 +440,12 @@ class RelayUplink {
     const socket = factory(this.options.url);
     this.socket = socket;
     socket.addEventListener("open", () => {
-      this.send({ kind: "ready", v: PROTOCOL_VERSION, targets: this.host.targets() });
+      this.send({
+        kind: "ready",
+        v: PROTOCOL_VERSION,
+        targets: this.host.targets(),
+        handles: this.host.handledMethods(),
+      });
     });
     socket.addEventListener("message", (event) => {
       const message = parseJson<RelayToHostMessage>(String(event.data));
@@ -406,6 +497,19 @@ class RelayUplink {
       );
     } else if (message.kind === "detached") {
       this.host.releaseEnablesFor(message.targetId, `relay-${message.sessionId}`);
+    } else if (message.kind === "browserRequest") {
+      this.host.handleBrowserRequest(message.method, message.params).then(
+        (result) => this.send({ kind: "browserResult", id: message.id, result }),
+        (error: unknown) =>
+          this.send({
+            kind: "browserResult",
+            id: message.id,
+            error: {
+              code: CDP_SERVER_ERROR,
+              message: error instanceof Error ? error.message : String(error),
+            },
+          }),
+      );
     }
   }
 

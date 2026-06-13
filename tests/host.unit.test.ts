@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
 import { type FrameElementLike, IcdpHost, type WindowLike } from "../src/host/index.ts";
 
@@ -238,5 +238,158 @@ describe("pairing lifecycle", () => {
     host.unpair("preview");
     await expect(pending).rejects.toThrow("Target destroyed");
     expect(events).toContain("targetDestroyed");
+  });
+});
+
+describe("target lifecycle hooks", () => {
+  test("handledMethods reflects the provided callbacks", () => {
+    const { win } = fakeWindow();
+    expect(new IcdpHost({ window: win }).handledMethods()).toEqual([]);
+    // Each hook advertises only its own method.
+    expect(new IcdpHost({ window: win, onCreateTarget: () => "x" }).handledMethods()).toEqual([
+      "Target.createTarget",
+    ]);
+    expect(new IcdpHost({ window: win, onCloseTarget: () => {} }).handledMethods()).toEqual([
+      "Target.closeTarget",
+    ]);
+    const both = new IcdpHost({ window: win, onCreateTarget: () => "x", onCloseTarget: () => {} });
+    expect(both.handledMethods()).toEqual(["Target.createTarget", "Target.closeTarget"]);
+  });
+
+  test("onCreateTarget pairs an iframe and resolves only once it connects", async () => {
+    const { win, emit } = fakeWindow();
+    const frame = fakeIframe();
+    let seenParams: unknown;
+    const host = new IcdpHost({
+      window: win,
+      onCreateTarget: (params) => {
+        seenParams = params;
+        host.pair(frame.iframe, { targetId: "tab-2", origins: [FRAME_ORIGIN] });
+        return "tab-2";
+      },
+    });
+
+    const pending = host.handleBrowserRequest("Target.createTarget", { url: `${FRAME_ORIGIN}/x` });
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    await flush();
+    // The Target is paired but not connected yet, so createTarget must not resolve.
+    expect(settled).toBe(false);
+    expect(host.targets().map((target) => target.targetId)).toContain("tab-2");
+
+    emit({
+      data: { icdp: "hello", v: 1, title: "Tab 2", url: `${FRAME_ORIGIN}/x` },
+      origin: FRAME_ORIGIN,
+      source: frame.contentWindow,
+    });
+    await expect(pending).resolves.toEqual({ targetId: "tab-2" });
+    expect(seenParams).toEqual({ url: `${FRAME_ORIGIN}/x` });
+  });
+
+  test("createTarget rejects if the new Target is destroyed before connecting", async () => {
+    const { win } = fakeWindow();
+    const frame = fakeIframe();
+    const host = new IcdpHost({
+      window: win,
+      onCreateTarget: () => {
+        host.pair(frame.iframe, { targetId: "doomed", origins: [FRAME_ORIGIN] });
+        return "doomed";
+      },
+    });
+    const pending = host.handleBrowserRequest("Target.createTarget", {});
+    await flush();
+    host.unpair("doomed");
+    await expect(pending).rejects.toThrow("destroyed before connecting");
+  });
+
+  test("createTarget rejects when no handler is configured", async () => {
+    const { win } = fakeWindow();
+    const host = new IcdpHost({ window: win });
+    await expect(host.handleBrowserRequest("Target.createTarget", {})).rejects.toThrow(
+      "not handled",
+    );
+  });
+
+  test("createTarget rejects and tears the Target down if it never connects", async () => {
+    vi.useFakeTimers();
+    try {
+      const { win } = fakeWindow();
+      const frame = fakeIframe();
+      const host = new IcdpHost({
+        window: win,
+        onCreateTarget: () => {
+          // Pair an iframe whose Frame Agent never sends "hello".
+          host.pair(frame.iframe, { targetId: "slow", origins: [FRAME_ORIGIN] });
+          return "slow";
+        },
+      });
+      const pending = host.handleBrowserRequest("Target.createTarget", {});
+      const rejected = expect(pending).rejects.toThrow(/did not connect within 10000ms/);
+      await vi.advanceTimersByTimeAsync(10_000);
+      await rejected;
+      // The zombie Target must not survive a failed createTarget.
+      expect(host.targets().map((target) => target.targetId)).not.toContain("slow");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("createTarget resolves immediately when the Target is already connected", async () => {
+    const { win, emit } = fakeWindow();
+    const frame = fakeIframe();
+    const host = new IcdpHost({
+      window: win,
+      onCreateTarget: () => {
+        host.pair(frame.iframe, { targetId: "fast", origins: [FRAME_ORIGIN] });
+        // Complete the handshake synchronously, before returning the id.
+        emit({
+          data: { icdp: "hello", v: 1, title: "Fast", url: `${FRAME_ORIGIN}/f` },
+          origin: FRAME_ORIGIN,
+          source: frame.contentWindow,
+        });
+        return "fast";
+      },
+    });
+    await expect(
+      host.handleBrowserRequest("Target.createTarget", { url: `${FRAME_ORIGIN}/f` }),
+    ).resolves.toEqual({ targetId: "fast" });
+  });
+
+  test("onCloseTarget tears the Target down", async () => {
+    const { win } = fakeWindow();
+    const closed: string[] = [];
+    const host = new IcdpHost({
+      window: win,
+      onCloseTarget: (id) => {
+        closed.push(id);
+      },
+    });
+    await expect(
+      host.handleBrowserRequest("Target.closeTarget", { targetId: "preview" }),
+    ).resolves.toEqual({ success: true });
+    expect(closed).toEqual(["preview"]);
+  });
+
+  test("a throwing or rejecting onCloseTarget surfaces as a rejection", async () => {
+    const { win } = fakeWindow();
+    const sync = new IcdpHost({
+      window: win,
+      onCloseTarget: () => {
+        throw new Error("still in use");
+      },
+    });
+    await expect(
+      sync.handleBrowserRequest("Target.closeTarget", { targetId: "preview" }),
+    ).rejects.toThrow("still in use");
+
+    const async = new IcdpHost({
+      window: win,
+      onCloseTarget: () => Promise.reject(new Error("busy")),
+    });
+    await expect(
+      async.handleBrowserRequest("Target.closeTarget", { targetId: "preview" }),
+    ).rejects.toThrow("busy");
   });
 });

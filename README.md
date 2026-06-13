@@ -52,6 +52,26 @@ const disconnect = host.connectRelay({ url: "ws://localhost:9222/icdp/host" });
 
 Target identity belongs to the Pairing: reloads and navigations keep the same `targetId` (Clients see `Page.frameNavigated`); commands in flight when a document dies fail fast with `-32000`. The Relay uplink is just another consumer of the same hub — events broadcast to all attached sessions, domain enables are ref-counted.
 
+#### Client-driven target lifecycle (optional)
+
+By default only the Host creates Targets (via `pair()`), so a Client's `Target.createTarget` is rejected and `Target.closeTarget` is a no-op. Pass `onCreateTarget` / `onCloseTarget` to let a Client open and close Targets itself:
+
+```ts
+const host = new IcdpHost({
+  onCreateTarget: ({ url }) => {
+    const iframe = document.createElement("iframe");
+    iframe.src = url ?? "about:blank";
+    document.body.append(iframe);
+    const targetId = crypto.randomUUID();
+    host.pair(iframe, { targetId, origins: ["https://app.example.com"] });
+    return targetId; // string | Promise<string>
+  },
+  onCloseTarget: (targetId) => host.unpair(targetId), // + remove the iframe you made
+});
+```
+
+The Host advertises which of these it handles, so the Relay forwards only those and keeps its defaults for any hook you leave unset (existing Hosts are unaffected). `createTarget` resolves **only once the new Target completes its handshake**, so the Client's first command can't race the not-connected gate; a Target that never connects (timeout or early destroy) is torn down rather than left as a zombie. A bare `new IcdpHost(window)` is still accepted for back-compat.
+
 ### Relay — the server
 
 ```ts
@@ -68,7 +88,7 @@ One Host per Relay, new-wins: a newly connecting Host replaces a stale one, with
 
 ## Protocol shape
 
-- **Flat sessions only.** Clients connect to the single browser-level endpoint and use `Target.getTargets` / `Target.attachToTarget` (or `Target.setAutoAttach`) + `sessionId` routing. There are no per-target WebSocket URLs. Session-scoped `Target.*`/`Browser.*` housekeeping (e.g. agent-browser's session-scoped `Target.setAutoAttach`) is answered by the Relay; the Frame Agent never sees it.
+- **Flat sessions only.** Clients connect to the single browser-level endpoint and use `Target.getTargets` / `Target.attachToTarget` (or `Target.setAutoAttach`) + `sessionId` routing. There are no per-target WebSocket URLs. Session-scoped `Target.*`/`Browser.*` housekeeping (e.g. agent-browser's session-scoped `Target.setAutoAttach`) is answered by the Relay; the Frame Agent never sees it. Registry methods (`getTargets`/`attachToTarget`/`setAutoAttach`) are always Relay-owned; only the `Target.createTarget`/`Target.closeTarget` lifecycle can be delegated to the Host (see [Client-driven target lifecycle](#client-driven-target-lifecycle-optional)).
 - **Compatibility bar: agent-browser.** The supported command surface is the prior art's support matrix (AX-tree snapshots, semantic locators, click/fill/type, eval, waits, console, SPA history). Screenshots, PDF, file uploads, drag-and-drop, dialogs, and real network interception are intentionally out — page JavaScript cannot provide them. Raw Playwright over `connectOverCDP` is best-effort, not promised.
 
 ## Driving an icdp target with agent-browser

@@ -21,6 +21,9 @@ export type RelayCoreOptions = {
   product?: string;
   /** Absolute WebSocket URL of the browser endpoint, for /json payloads. */
   browserWsUrl?: string;
+  /** How long to wait for the Host to answer a forwarded browser-level request
+   *  before failing the Client. Backstops a silent or hung Host. */
+  browserRequestTimeoutMs?: number;
 };
 
 type ClientState = {
@@ -45,6 +48,11 @@ type PendingCommand = {
 /** Sentinel: the method was handled and a response was already sent. */
 const RESPONDED = Symbol("responded");
 
+/** Browser-domain methods a Host may take ownership of via the ready `handles`.
+ *  Registry methods (getTargets/attachToTarget/setAutoAttach/...) stay relay-owned:
+ *  they read the Relay's own session/target state, so the Host can't answer them. */
+const FORWARDABLE_BROWSER_METHODS = new Set(["Target.createTarget", "Target.closeTarget"]);
+
 export class RelayCore {
   private readonly product: string;
   private readonly browserWsUrl: string;
@@ -53,12 +61,27 @@ export class RelayCore {
   private readonly sessions = new Map<string, SessionState>();
   private readonly targets = new Map<string, TargetSummary>();
   private readonly pending = new Map<number, PendingCommand>();
+  /** Browser-level requests forwarded to the Host, awaiting a result. */
+  private readonly browserPending = new Map<
+    number,
+    {
+      client: ClientState;
+      clientId: CdpId | undefined;
+      /** Echoed back if the Client scoped the request to a session. */
+      sessionId: string | undefined;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
+  /** Browser-level methods the Host advertised it handles (from the ready message). */
+  private readonly hostHandles = new Set<string>();
+  private readonly browserRequestTimeoutMs: number;
   private nextBridgeId = 1;
   private nextSessionId = 1;
 
   constructor(options: RelayCoreOptions = {}) {
     this.product = options.product ?? "icdp/0.1";
     this.browserWsUrl = options.browserWsUrl ?? "";
+    this.browserRequestTimeoutMs = options.browserRequestTimeoutMs ?? 30_000;
   }
 
   // -- adapter wiring ---------------------------------------------------------
@@ -79,6 +102,8 @@ export class RelayCore {
   hostDisconnected(socket: SocketLike): void {
     if (this.hostSocket !== socket) return;
     this.hostSocket = null;
+    this.hostHandles.clear();
+    this.failBrowserPending("Host disconnected");
     this.dropAllTargets("Host disconnected");
   }
 
@@ -89,6 +114,9 @@ export class RelayCore {
     switch (message.kind) {
       case "ready":
         this.dropAllTargets("Host re-announced");
+        this.hostHandles.clear();
+        for (const handled of message.handles ?? [])
+          if (FORWARDABLE_BROWSER_METHODS.has(handled)) this.hostHandles.add(handled);
         for (const target of message.targets) this.addTarget(target);
         return;
       case "targetCreated":
@@ -127,6 +155,18 @@ export class RelayCore {
         }
         return;
       }
+      case "browserResult": {
+        const call = this.browserPending.get(message.id);
+        if (!call) return;
+        this.browserPending.delete(message.id);
+        clearTimeout(call.timer);
+        this.sendToClient(call.client, {
+          id: call.clientId,
+          ...(call.sessionId ? { sessionId: call.sessionId } : {}),
+          ...(message.error ? { error: message.error } : { result: message.result ?? {} }),
+        });
+        return;
+      }
     }
   }
 
@@ -144,6 +184,12 @@ export class RelayCore {
     if (!client) return;
     this.clients.delete(socket);
     for (const sessionId of client.sessions) this.endSession(sessionId, { notifyClient: false });
+    // Drop any browser-level request still in flight for this gone Client.
+    for (const [id, call] of this.browserPending) {
+      if (call.client !== client) continue;
+      this.browserPending.delete(id);
+      clearTimeout(call.timer);
+    }
   }
 
   clientMessage(socket: SocketLike, raw: string): void {
@@ -151,6 +197,27 @@ export class RelayCore {
     if (!client) return;
     const message = parseJson<CdpMessage>(raw);
     if (!message) return;
+
+    // Browser-domain lifecycle methods the Host advertised it handles → forward
+    // and await its result, instead of using the relay's built-in default below.
+    // These are not session-scoped, so we honour them whether or not the Client
+    // attached a sessionId (any sessionId is only echoed back on the response).
+    if (message.method && this.hostHandles.has(message.method) && this.hostSocket) {
+      const bridgeId = this.nextBridgeId++;
+      this.browserPending.set(bridgeId, {
+        client,
+        clientId: message.id,
+        sessionId: message.sessionId,
+        timer: this.armBrowserTimeout(bridgeId),
+      });
+      this.sendToHost({
+        kind: "browserRequest",
+        id: bridgeId,
+        method: message.method,
+        params: message.params ?? {},
+      });
+      return;
+    }
 
     if (message.sessionId) {
       this.routeSessionCommand(client, message);
@@ -232,6 +299,44 @@ export class RelayCore {
     try {
       this.hostSocket?.send(JSON.stringify(message));
     } catch {}
+  }
+
+  private failBrowserPending(reason: string): void {
+    for (const [id, call] of this.browserPending) {
+      this.browserPending.delete(id);
+      clearTimeout(call.timer);
+      this.sendToClient(call.client, {
+        id: call.clientId,
+        ...(call.sessionId ? { sessionId: call.sessionId } : {}),
+        error: { code: CDP_SERVER_ERROR, message: reason },
+      });
+    }
+  }
+
+  /** Bound a forwarded browser request so a silent or hung Host can't pin a
+   *  Client's command open forever (and leak the pending entry). */
+  private armBrowserTimeout(bridgeId: number): ReturnType<typeof setTimeout> {
+    const timer = setTimeout(
+      () => this.expireBrowserPending(bridgeId),
+      this.browserRequestTimeoutMs,
+    );
+    // Don't keep a Node event loop alive just for this backstop.
+    (timer as { unref?: () => void }).unref?.();
+    return timer;
+  }
+
+  private expireBrowserPending(bridgeId: number): void {
+    const call = this.browserPending.get(bridgeId);
+    if (!call) return;
+    this.browserPending.delete(bridgeId);
+    this.sendToClient(call.client, {
+      id: call.clientId,
+      ...(call.sessionId ? { sessionId: call.sessionId } : {}),
+      error: {
+        code: CDP_SERVER_ERROR,
+        message: "Host did not respond to the browser-level request in time",
+      },
+    });
   }
 
   private broadcastTargetEvent(method: string, params: Record<string, unknown>): void {
@@ -421,8 +526,11 @@ export class RelayCore {
       case "Security.setIgnoreCertificateErrors":
       case "Target.setRemoteLocations":
       case "Target.activateTarget":
-      case "Target.closeTarget":
         return {};
+      // CDP's Target.closeTarget returns { success }. This default applies only
+      // when no Host advertised the method (otherwise it's forwarded above).
+      case "Target.closeTarget":
+        return { success: true };
       case "Schema.getDomains":
         return { domains: [] };
       case "Target.getTargets":
