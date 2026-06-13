@@ -1,0 +1,52 @@
+name: Docs
+
+# Build the VitePress site and deploy it to GitHub Pages. Deploys when a GitHub
+# Release is published (so the published docs track the last npm release), and on
+# demand via the Actions tab for doc fixes between releases.
+#
+# One-time setup: GitHub repo → Settings → Pages → Build and deployment →
+# Source = "GitHub Actions". The site is served at https://olimsaidov.github.io/icdp/
+# (the `base` in docs/.vitepress/config.ts must match the repo name).
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+# Least-privilege token, plus what Pages deployment needs.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Let a production deploy finish; don't cancel it when a newer run queues.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so VitePress `lastUpdated` is accurate
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/configure-pages@v4
+      - run: npm ci
+      - run: npm run docs:build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/.vitepress/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

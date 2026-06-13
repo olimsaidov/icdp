@@ -11,5 +11,5 @@
   "insertFinalNewline": true,
   "sortImports": true,
   "sortPackageJson": true,
-  "ignorePatterns": ["dist", "node_modules"]
+  "ignorePatterns": ["dist", "docs", "node_modules"]
 }

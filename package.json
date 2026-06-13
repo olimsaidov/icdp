@@ -45,6 +45,9 @@
   "scripts": {
     "build": "tsdown",
     "check": "tsc --noEmit && oxlint && oxfmt --check .",
+    "docs:build": "vitepress build docs",
+    "docs:dev": "vitepress dev docs",
+    "docs:preview": "vitepress preview docs",
     "fmt": "oxfmt .",
     "gen:conformance": "node scripts/gen-conformance.ts",
     "playground": "node playground/server.ts",
@@ -64,11 +67,14 @@
     "@types/node": "^24",
     "@types/ws": "^8",
     "jsdom": "^29.1.1",
+    "mermaid": "^11.15.0",
     "oxfmt": "^0.54.0",
     "oxlint": "^1.69.0",
     "rolldown": "^1.1.1",
     "tsdown": "^0.22.2",
     "typescript": "^5",
+    "vitepress": "^1.6.4",
+    "vitepress-plugin-mermaid": "^2.0.17",
     "vitest": "^4.1.8"
   },
   "engines": {
