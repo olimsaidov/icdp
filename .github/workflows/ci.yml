@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      # Excludes the agent-browser e2e suite, which needs a real browser.
+      # The accessibility conformance suite runs here with no Chromium checkout:
+      # its goldens are vendored in tests/ax/conformance.expected.ts (regenerate
+      # locally with `npm run gen:conformance`).
+      - run: npm test
