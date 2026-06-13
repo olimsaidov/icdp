@@ -239,6 +239,40 @@ describe("pairing lifecycle", () => {
     await expect(pending).rejects.toThrow("Target destroyed");
     expect(events).toContain("targetDestroyed");
   });
+
+  test("a load event does not re-probe (or reload) an already-connected Target", async () => {
+    const { frame } = await connect();
+    const countProbes = () =>
+      frame.posted.filter((post) => (post.message as { icdp?: string }).icdp === "probe").length;
+    const probesBefore = countProbes();
+    const welcomesBefore = frame.posted.filter(
+      (post) => (post.message as { icdp?: string }).icdp === "welcome",
+    ).length;
+
+    // The iframe's initial load fires *after* the boot hello already connected.
+    // It must not re-probe — that would draw a second hello and fail in-flight work.
+    frame.fireLoad();
+
+    expect(countProbes()).toBe(probesBefore);
+    expect(
+      frame.posted.filter((post) => (post.message as { icdp?: string }).icdp === "welcome").length,
+    ).toBe(welcomesBefore);
+  });
+
+  test("a load event re-probes while not yet connected (handshake backstop)", () => {
+    const { win } = fakeWindow();
+    const host = new IcdpHost(win);
+    const frame = fakeIframe();
+    host.pair(frame.iframe, { targetId: "preview", origins: "*" });
+    const countProbes = () =>
+      frame.posted.filter((post) => (post.message as { icdp?: string }).icdp === "probe").length;
+    const before = countProbes();
+
+    frame.fireLoad();
+
+    // No channel yet, so the load is a chance to re-elicit the agent's hello.
+    expect(countProbes()).toBe(before + 1);
+  });
 });
 
 describe("target lifecycle hooks", () => {

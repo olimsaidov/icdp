@@ -138,7 +138,14 @@ export class IcdpHost {
       pending: new Map(),
       enables: new Map(),
       localSessions: new Map(),
-      onLoad: () => this.probe(pairing),
+      // Re-probe on load only when we have no channel yet. A connected pairing
+      // must not be re-probed: the agent would answer with a fresh hello, which
+      // handleWindowMessage treats as a reload and uses to fail in-flight
+      // commands. The initial load of a freshly-paired iframe already connected
+      // via the agent's boot hello, and a genuine reload re-announces on its own.
+      onLoad: () => {
+        if (!pairing.port) this.probe(pairing);
+      },
     };
     this.pairings.set(options.targetId, pairing);
     iframe.addEventListener("load", pairing.onLoad);
