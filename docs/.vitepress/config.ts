@@ -98,6 +98,10 @@ export default withMermaid(
                 text: "Embed a Relay in another runtime",
                 link: "/guides/embed-a-relay-in-another-runtime",
               },
+              {
+                text: "Use in a bundler app (Next.js, Vite)",
+                link: "/guides/use-in-a-bundler-app",
+              },
             ],
           },
         ],
