@@ -11,9 +11,9 @@ Starts everything on fixed ports: a shell page (Host) at `http://127.0.0.1:9222`
 - **`playground`** — a feature-dense app: forms of every input type, SPA tabs via `history.pushState`, async zones (delayed lab results, toast, late-appearing button), console buttons, shadow DOM, a nested srcdoc iframe, hidden cases that must _not_ appear in snapshots, mouse pad / scroll boxes / offscreen inputs, full navigation to `/page-two`, and `window.playgroundState()` for `eval` assertions (also rendered live on the page).
 - **`todo`** — a second target, so multi-target discovery (`Target.getTargets`, `/json/list`) has something to find.
 
-Beyond those two boot slots, a connected Client can open Targets on demand: the shell passes `onCreateTarget` / `onCloseTarget` to `IcdpHost`, so a Client's `Target.createTarget` materialises a fresh iframe as another panel in the **same targets grid** (peers of the boot two, just tagged `CDP`) and `Target.closeTarget` tears it down. createTarget resolves only once the new Target finishes its handshake, and one that never connects is rolled back automatically instead of lingering.
+Beyond those two boot slots, a connected Client can open Targets on demand: the shell passes `onCreateTarget` / `onCloseTarget` to `IcdpHost`, so a Client's `Target.createTarget` materialises a fresh iframe as another panel in the **same targets grid** — indistinguishable from the boot two — and `Target.closeTarget` tears it down. createTarget resolves only once the new Target finishes its handshake, and one that never connects is rolled back automatically instead of lingering.
 
-The shell itself shows every target in one uniform grid, a live target table (Client-created rows tagged `CDP`), a console panel fed by a **local session** (click the app's console buttons and watch logs arrive with no relay in that path), and per-target **Reload / Unpair** (or **Close**) buttons to exercise stable target identity and lifecycle churn.
+The shell itself shows every target in one uniform grid, a live target table, a console panel fed by a **local session** (click the app's console buttons and watch logs arrive with no relay in that path), and per-target **Reload / Close** buttons to exercise stable target identity and lifecycle churn.
 
 ## Driving it
 
@@ -40,7 +40,7 @@ agent-browser --cdp 9222 tab new http://127.0.0.1:9223/todo
 agent-browser --cdp 9222 tab close t3                            # Target.closeTarget -> iframe removed
 ```
 
-Each `tab new` appears as another panel in the targets grid (tagged `CDP` in the table); `tab close` removes it. Point `tab new` at a non-app origin (e.g. `https://example.com`, which carries no Frame Agent) to watch the create **time out and roll the half-made Target back** instead of leaving a zombie — the v0.2.0 await-connect contract in action. The hook is also the Host's policy boundary: `tab close` on a Host-owned static target (`playground` / `todo`) is **rejected**, since the shell's `onCloseTarget` only closes Targets the Client itself created.
+Each `tab new` appears as another panel in the targets grid, identical to the boot two; `tab close` removes it (and a boot target is no different — closing it works the same way). Point `tab new` at a non-app origin (e.g. `https://example.com`, which carries no Frame Agent) to watch the create **time out and roll the half-made Target back** instead of leaving a zombie — the v0.2.0 await-connect contract in action.
 
 Things to try: fill the intake form and submit it (the submit logs to the shell console panel), switch SPA tabs and use `wait --url` / `back` / `forward`, race the async buttons with `wait --text` and `wait --fn`, snapshot and confirm the hidden cases are absent, navigate to `/page-two` and back (target identity survives), reload or unpair a target from the shell and watch the target table, open and close Targets from the Client with `tab new` / `tab close`, and run `screenshot` to see it fail gracefully (intentionally unsupported).
 
