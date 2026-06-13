@@ -2,6 +2,14 @@
   "name": "icdp",
   "version": "0.1.0",
   "description": "Chrome DevTools Protocol over an iframe boundary: drive and inspect embedded (including cross-origin) apps with CDP tools, without a real browser debugging session.",
+  "homepage": "https://github.com/olimsaidov/icdp#readme",
+  "bugs": "https://github.com/olimsaidov/icdp/issues",
+  "license": "MIT",
+  "author": "Olim Saidov",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/olimsaidov/icdp.git"
+  },
   "files": [
     "dist",
     "src",
