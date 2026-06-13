@@ -1,0 +1,85 @@
+/* ---------------------------------------------------------------------------
+   Mermaid diagrams — follow the VitePress theme in both light and dark mode.
+   Mermaid ships its own palette (pale node fills, white edge-label boxes, an
+   unbounded width); we override it with the site's own CSS variables so the
+   diagrams read as part of the page rather than pasted-in images.
+   --------------------------------------------------------------------------- */
+
+.mermaid {
+  display: flex;
+  justify-content: center;
+  margin: 28px 0;
+  overflow-x: auto; /* scroll a very wide diagram instead of clipping it */
+}
+
+.mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Node shapes: subtle, card-like, on-theme (like VitePress custom blocks). */
+.mermaid .node rect,
+.mermaid .node polygon,
+.mermaid .node circle,
+.mermaid .node ellipse,
+.mermaid .node path {
+  fill: var(--vp-c-bg-soft) !important;
+  stroke: var(--vp-c-border) !important;
+  stroke-width: 1px !important;
+  rx: 8px;
+  ry: 8px;
+}
+
+/* Node text. */
+.mermaid .node .nodeLabel,
+.mermaid .node .nodeLabel p,
+.mermaid .node foreignObject div,
+.mermaid .node text {
+  color: var(--vp-c-text-1) !important;
+  fill: var(--vp-c-text-1) !important;
+}
+
+/* Edges. */
+.mermaid .edgePath .path,
+.mermaid .flowchart-link {
+  stroke: var(--vp-c-text-3) !important;
+}
+.mermaid marker path,
+.mermaid .marker,
+.mermaid defs marker path {
+  fill: var(--vp-c-text-3) !important;
+  stroke: var(--vp-c-text-3) !important;
+}
+
+/* Edge labels: sit on the page colour so the line behind the text is knocked
+   out cleanly — no stray white box in dark mode. */
+.mermaid .edgeLabel,
+.mermaid .edgeLabel p,
+.mermaid .edgeLabel .nodeLabel,
+.mermaid .edgeLabel foreignObject div {
+  color: var(--vp-c-text-2) !important;
+  background: var(--vp-c-bg) !important;
+  font-size: 13px !important;
+}
+.mermaid .edgeLabel rect,
+.mermaid .labelBkg {
+  fill: var(--vp-c-bg) !important;
+  background-color: var(--vp-c-bg) !important;
+  opacity: 1 !important;
+}
+
+/* The hub node (class `hub` in the diagram source): a restrained brand accent,
+   the same treatment VitePress gives its `tip` blocks. Declared after the
+   generic node rules so it wins at equal specificity. */
+.mermaid .hub rect {
+  fill: var(--vp-c-brand-soft) !important;
+  stroke: var(--vp-c-brand-1) !important;
+  stroke-width: 1.5px !important;
+}
+.mermaid .hub .nodeLabel,
+.mermaid .hub .nodeLabel p,
+.mermaid .hub foreignObject div,
+.mermaid .hub text {
+  color: var(--vp-c-brand-1) !important;
+  fill: var(--vp-c-brand-1) !important;
+}

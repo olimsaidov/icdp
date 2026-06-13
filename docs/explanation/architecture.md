@@ -15,9 +15,9 @@ Four components sit on a line, each its own package entry point:
 ```mermaid
 flowchart TD
     C["Client"] -->|"WebSocket · standard CDP, flat sessions"| R["Relay"]
-    R -->|"WebSocket · bridge protocol"| H["Host"]
+    R -->|"WebSocket · bridge protocol"| H["Host"]:::hub
     H -->|"MessagePort · one per iframe"| F["Frame Agent"]
-    style H fill:#005fb8,stroke:#003a73,color:#fff
+    classDef hub stroke-width:2px;
 ```
 
 The [**Frame Agent**](/explanation/concepts) runs inside the embedded app. It emulates CDP domains against the real DOM and is the party that ultimately executes commands. The embedded app ships the agent itself — the Host never injects it. On boot the agent announces a `hello` to the parent and then stays dormant unless the parent's origin is on its allowlist. See [Embed the Frame Agent](/guides/embed-the-frame-agent) and the [Frame Agent reference](/reference/frame).
@@ -46,11 +46,11 @@ icdp inverts that. The Host owns the Frame Agent channels and fans sessions out 
 
 ```mermaid
 flowchart LR
-    LS["Local session"] --> H["Host — the hub"]
+    LS["Local session"] --> H["Host — the hub"]:::hub
     UP["Relay uplink"] --> H
     H --> P1["Pairing → Frame Agent"]
     H --> P2["Pairing → Frame Agent"]
-    style H fill:#005fb8,stroke:#003a73,color:#fff
+    classDef hub stroke-width:2px;
 ```
 
 A local console panel and the Relay uplink are the *same kind of thing* to the Host: both are consumers of the same fan-out. The Relay is not privileged; it is one more attachment that happens to bridge to the network.

@@ -17,37 +17,39 @@ hero:
       link: /reference/
 
 features:
-  - title: Cooperative & cross-origin
-    details: The embedded app includes the Frame Agent itself and answers CDP against its own real DOM. The Host never injects code, so it works across an origin boundary a real debugger can't reach.
+  - title: Works across origins
+    details: The embedded app opts in with a small script and answers commands against its own live page. Nothing is injected from outside, so it works even when the iframe is on a different origin than the page around it.
     link: /guides/embed-the-frame-agent
   - title: No real browser required
-    details: Page JavaScript emulates the CDP domains, so the whole chain runs anywhere a DOM exists — headless tests, CI, jsdom — with no Chromium debugging session.
+    details: Ordinary page JavaScript answers the commands, so the whole thing runs anywhere a page exists — headless tests, CI, even jsdom — with no Chromium and no debugging session.
     link: /explanation/architecture
-  - title: Server-optional
-    details: The Host is a real session-fan-out hub, not a dumb pipe. A parent-window console panel can tap a Target with no Relay anywhere in the path.
+  - title: No server required
+    details: Code in the parent page can drive and read the embedded app directly. A console panel or debug overlay works with no server anywhere in the path.
     link: /guides/local-console-panel
-  - title: Standard CDP, flat sessions
-    details: Clients attach to one browser-level endpoint and route by sessionId. agent-browser is the compatibility bar; chrome-remote-interface and Playwright-over-CDP also connect.
+  - title: Works with the tools you know
+    details: It speaks the standard Chrome DevTools Protocol, so existing tools connect as they are — agent-browser is fully supported, and chrome-remote-interface and Playwright over CDP connect too.
     link: /explanation/flat-session-protocol
-  - title: Stable target identity
-    details: Reloads and cross-app navigations keep the same targetId; commands in flight when a document dies fail fast with a CDP error and are never replayed.
+  - title: Survives reloads and navigation
+    details: Reloads and page-to-page navigation keep your handle on the app, so you don't re-attach after every transition. A command caught mid-navigation fails cleanly instead of running against the wrong page.
     link: /explanation/target-lifecycle
-  - title: Five small entry points
-    details: /frame, /host, /relay, /relay/node, and /protocol — each a focused module with a typed surface.
+  - title: Small, focused modules
+    details: Pick only what each part of your app needs — one piece for the embedded app, one for the parent page, one for the server.
     link: /reference/
 ---
 
-## The topology
+## How it works
 
-icdp threads a single CDP conversation across an iframe boundary. A Client speaks
-standard CDP to the Relay; the Relay bridges to the Host; the Host fans sessions
-out to one Frame Agent per iframe.
+A CDP automation tool drives an app running inside an iframe — even a cross-origin
+one — with no real browser debugging session. Your tool speaks standard Chrome
+DevTools Protocol to a small web server; the server connects to the web page that
+hosts the iframe; that page passes each command into the embedded app, which runs
+it against its own live DOM.
 
 ```mermaid
 flowchart TD
-    C["Client"] -->|"CDP over WebSocket"| R["Relay"]
-    R -->|"bridge protocol"| H["Host"]
-    H -->|"MessagePort per iframe"| F["Frame Agent"]
+    C["agent-browser / Playwright"] -->|"speaks CDP"| R["Web server"]
+    R -->|"connects to"| H["Your web page"]
+    H -->|"embeds"| F["The app in an iframe"]
 ```
 
 ## Which page do I want?

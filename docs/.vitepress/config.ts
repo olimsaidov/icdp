@@ -39,6 +39,22 @@ export default withMermaid(
     // in docs/adr/ for the repo, but they are excluded from the published site.
     srcExclude: ["adr/**"],
 
+    // Mermaid layout only — responsive width + breathing room. Colours live in
+    // docs/.vitepress/theme/custom.css so the diagrams follow the site theme.
+    mermaid: {
+      // mermaid measures node widths with this font, so it must match what the
+      // CSS renders or text overflows its box. Keep it aligned with the site font.
+      fontFamily:
+        "Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
+      flowchart: {
+        useMaxWidth: true,
+        htmlLabels: true,
+        padding: 12,
+        nodeSpacing: 44,
+        rankSpacing: 52,
+      },
+    },
+
     head: [["meta", { name: "theme-color", content: "#005fb8" }]],
 
     themeConfig: {
