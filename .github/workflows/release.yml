@@ -45,13 +45,9 @@ jobs:
       # Trusted publishing (OIDC) requires npm >= 11.5.1; node 24 bundles an
       # older npm, so upgrade.
       - run: npm install -g npm@latest
-      - run: npm --version
       - run: npm ci
       - run: npm run check
       - run: npm test
       - run: npm run build
-      - name: Check OIDC availability
-        run: |
-          echo "id-token request URL present: ${ACTIONS_ID_TOKEN_REQUEST_URL:+yes}"
-          echo "id-token request token present: ${ACTIONS_ID_TOKEN_REQUEST_TOKEN:+yes}"
-      - run: npm publish --loglevel verbose
+      # OIDC trusted publishing: no token/secret; provenance is automatic.
+      - run: npm publish
