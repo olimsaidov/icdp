@@ -665,18 +665,43 @@ function getOuterHTML(params: CdpParams<"DOM.getOuterHTML">): Protocol.DOM.GetOu
 
 function focusNode(params: CdpParams<"DOM.focus">): Record<string, never> {
   const element = elementForBackendId(Number(params.backendNodeId ?? params.nodeId));
-  if (element instanceof HTMLElement) element.focus();
+  // preventScroll: a default focus() scrolls the element into view across every
+  // ancestor — including the embedding page across the iframe boundary, yanking
+  // the host. Revealing the element is scrollIntoViewIfNeeded's job (and it stays
+  // within the frame); focus must not move the parent.
+  if (element instanceof HTMLElement) element.focus({ preventScroll: true });
   return {};
 }
 
 function scrollIntoViewIfNeeded(
   params: CdpParams<"DOM.scrollIntoViewIfNeeded">,
 ): Record<string, never> {
-  elementForBackendId(Number(params.backendNodeId ?? params.nodeId)).scrollIntoView({
-    block: "center",
-    inline: "center",
-  });
+  revealWithinFrame(elementForBackendId(Number(params.backendNodeId ?? params.nodeId)));
   return {};
+}
+
+/**
+ * Bring an element into view by scrolling its own scroll containers and the
+ * frame's viewport — never `Element.scrollIntoView`, which cascades across the
+ * iframe boundary and yanks the embedding page to re-position the frame. Honours
+ * "IfNeeded": a no-op when the element is already on screen, minimal scroll
+ * otherwise.
+ */
+function revealWithinFrame(el: Element): void {
+  const container = scrollableAncestor(el);
+  if (container instanceof Element && container !== document.scrollingElement) {
+    const c = container.getBoundingClientRect();
+    const r = el.getBoundingClientRect();
+    if (r.top < c.top) container.scrollTop += r.top - c.top;
+    else if (r.bottom > c.bottom) container.scrollTop += r.bottom - c.bottom;
+    if (r.left < c.left) container.scrollLeft += r.left - c.left;
+    else if (r.right > c.right) container.scrollLeft += r.right - c.right;
+  }
+  // window.scrollBy scrolls this frame's own document, not the parent's.
+  const r = el.getBoundingClientRect();
+  const dy = r.top < 0 ? r.top : r.bottom > window.innerHeight ? r.bottom - window.innerHeight : 0;
+  const dx = r.left < 0 ? r.left : r.right > window.innerWidth ? r.right - window.innerWidth : 0;
+  if (dx || dy) window.scrollBy(dx, dy);
 }
 
 function requestChildNodes(params: CdpParams<"DOM.requestChildNodes">): Record<string, never> {
@@ -1021,6 +1046,19 @@ function announce(allowed: string[] | "*"): void {
 export function startFrameAgent(options: FrameAgentOptions): void {
   if (started || window.parent === window) return;
   started = true;
+
+  // The embedded app shipped this agent to be automated, and automation must
+  // never scroll the *host* page. Element.scrollIntoView cascades across the
+  // iframe boundary — it scrolls every scrollable ancestor, including the
+  // embedding document — and agent-browser evals it to position elements before
+  // clicking. Replace it (and the legacy scrollIntoViewIfNeeded) with a
+  // frame-local reveal so commands move the frame, never the page around it.
+  const revealOnly = function (this: Element): void {
+    revealWithinFrame(this);
+  };
+  Element.prototype.scrollIntoView = revealOnly as Element["scrollIntoView"];
+  const proto = Element.prototype as Element & { scrollIntoViewIfNeeded?: () => void };
+  if (typeof proto.scrollIntoViewIfNeeded === "function") proto.scrollIntoViewIfNeeded = revealOnly;
 
   const allowed = options.allowedParents;
 
