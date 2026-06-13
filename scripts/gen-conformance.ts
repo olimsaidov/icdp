@@ -3,16 +3,22 @@
  *
  * Reads the local Chromium checkout's inspector-protocol accessibility goldens
  * and vendors each `<name>-expected.txt` into tests/ax/conformance.expected.ts
- * as an embedded string. The conformance suite then asserts our ax-tree.ts
- * output against these vendored expectations with NO Chromium dependency at run
- * time — so the tests run anywhere, including GitHub Actions.
+ * as an embedded string, so the conformance suite asserts our ax-tree.ts output
+ * against these vendored expectations with NO Chromium dependency at run time —
+ * the tests run anywhere, including GitHub Actions.
  *
- * Regenerate when ax-tree.ts changes the wire format, when a fixture/driver in
- * _conformance.ts changes, or when syncing to a newer Chromium. The case list
- * (names + which are ceiling-only) is the single source of truth in
- * _conformance.ts; ceiling cases have no byte-asserted golden and are skipped.
+ * Regenerate ONLY when the upstream golden changes (syncing to a newer Chromium)
+ * or when ADDING a new asserted case to CASES. Editing a driver/printer/fixture
+ * in _conformance.ts does NOT need a regen: the conformance assertion compares
+ * live runCase() output against the unchanged vendored golden and fails directly
+ * if a driver drifts. The case list (names + which are ceiling-only) is the
+ * single source of truth in _conformance.ts; ceiling cases have no byte-asserted
+ * golden and are skipped here.
+ *
+ * The emitted object literal is oxfmt-clean by construction (only the embedded
+ * golden strings vary, and oxfmt never reformats template contents), so
+ * `npm run check` stays green with no post-format step.
  */
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -61,15 +67,16 @@ function main(): void {
 // Vendored expected output of Chromium's inspector-protocol accessibility
 // goldens (web_tests/http/tests/inspector-protocol/accessibility/<name>-expected.txt),
 // embedded so the conformance suite runs with no Chromium dependency (CI-safe).
-// Regenerate after wire-format changes or a Chromium sync: npm run gen:conformance
+// Regenerate after a Chromium sync or when adding a case: npm run gen:conformance
 `;
+  // Write to a temp path then rename, so a crash mid-write never truncates the
+  // committed, load-bearing expected module (rename is atomic on one filesystem).
+  const tmp = `${OUT}.tmp`;
   fs.writeFileSync(
-    OUT,
+    tmp,
     `${header}\nexport const EXPECTED: Record<string, string> = {\n${entries.join("\n")}\n};\n`,
   );
-
-  // Normalize formatting so `npm run check` stays clean.
-  execFileSync("oxfmt", [path.relative(process.cwd(), OUT)], { stdio: "inherit" });
+  fs.renameSync(tmp, OUT);
   console.log(`Vendored ${asserted.length} goldens → ${path.relative(process.cwd(), OUT)}`);
 }
 

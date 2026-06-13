@@ -3,7 +3,7 @@
 // Vendored expected output of Chromium's inspector-protocol accessibility
 // goldens (web_tests/http/tests/inspector-protocol/accessibility/<name>-expected.txt),
 // embedded so the conformance suite runs with no Chromium dependency (CI-safe).
-// Regenerate after wire-format changes or a Chromium sync: npm run gen:conformance
+// Regenerate after a Chromium sync or when adding a case: npm run gen:conformance
 
 export const EXPECTED: Record<string, string> = {
   "getFullAXTree-depth": `Tests Accessibility.getRootAXNode

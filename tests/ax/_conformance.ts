@@ -37,6 +37,15 @@ function setup(html: string): Options {
   document.title = "";
   document.head.innerHTML = "";
   document.documentElement.removeAttribute("data-dump");
+  // A prior case may have appended stray children directly to <html> (the query
+  // fixture attaches a shadow host as a sibling of <head>/<body>, mirroring the
+  // golden's documentElement.appendChild). Strip everything but <head>/<body>
+  // so each case starts from a clean document regardless of run order. Snapshot
+  // first (the live children collection mutates as we remove).
+  const strays: Element[] = [];
+  for (const child of document.documentElement.children)
+    if (child !== document.head && child !== document.body) strays.push(child);
+  for (const child of strays) child.remove();
   document.body.innerHTML = html;
   return { document, frameId: "icdp-frame", registry: createDomRegistry() };
 }
@@ -45,10 +54,12 @@ function roundtrip<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-/** URLs depend on the serving host (jsdom vs Chromium's test server) — mask
- *  them on both sides before comparison. */
+/** URL property values differ entirely between jsdom (http://localhost:…) and
+ *  Chromium's test server (http://127.0.0.1:8000/…/resources/…) — both host AND
+ *  path. Collapse the whole URL on both sides; URL host/path is not part of what
+ *  these goldens verify. */
 export function maskUrls(text: string): string {
-  return text.replace(/(value : )http:\/\/\S+/g, "$1<url>");
+  return text.replace(/(value : )https?:\/\/\S+/g, "$1<url>");
 }
 
 // ---- testRunner.log port (inspector-protocol-test.js _logObject) ----

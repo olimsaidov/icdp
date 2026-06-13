@@ -37,4 +37,13 @@ describe("Chromium accessibility conformance", () => {
       expect(maskUrls(actual)).toBe(maskUrls(expected!));
     });
   }
+
+  // Cases share one jsdom document; guard that setup() fully isolates them.
+  // The query fixture appends a shadow host directly under <html>, which would
+  // leak into a later case if setup() only reset <head>/<body>.
+  test("cases are isolated — no DOM leaks across runs", () => {
+    const first = runCase("getFullAXTree-depth");
+    runCase("accessibility-query-axtree");
+    expect(runCase("getFullAXTree-depth")).toBe(first);
+  });
 });
