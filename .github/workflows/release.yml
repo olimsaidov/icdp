@@ -30,6 +30,15 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
+      - name: Verify release tag matches package.json version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::Release tag v$tag does not match package.json version $pkg"
+            exit 1
+          fi
+          echo "Releasing v$pkg"
       # Trusted publishing requires npm >= 11.5.1.
       - run: npm install -g npm@latest
       - run: npm ci
