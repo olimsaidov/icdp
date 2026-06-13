@@ -92,8 +92,15 @@ Drive it with agent-browser (one wait first to sync its page model):
   agent-browser --session cdp --cdp ${RELAY_PORT} wait --text "Lab results loaded"
   agent-browser --session cdp --cdp ${RELAY_PORT} eval "window.playgroundState()"
 
+Open and close Targets from the Client (Target.createTarget / closeTarget):
+
+  agent-browser --session cdp --cdp ${RELAY_PORT} tab new ${APP_ORIGIN}/page-two
+  agent-browser --session cdp --cdp ${RELAY_PORT} tab list
+  agent-browser --session cdp --cdp ${RELAY_PORT} tab close t3
+
 Things to try: forms, SPA tabs (pushstate/back/forward), async waits, console
 buttons (watch the shell's local console panel), hidden-element snapshots,
-scroll/offscreen, the second "todo" target, and the shell's Reload / Unpair
+scroll/offscreen, the second "todo" target, opening/closing targets from the
+Client (they join the same targets grid), and the shell's Reload / Unpair
 buttons for target lifecycle. ICDP_DEBUG=1 logs all relay traffic.
 `);

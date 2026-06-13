@@ -38,10 +38,47 @@
       }
       main {
         display: grid;
-        grid-template-columns: 1fr 1fr 380px;
+        grid-template-columns: 1fr 380px;
         gap: 12px;
         padding: 12px;
         height: calc(100vh - 44px);
+      }
+      /* One uniform grid for every target: two at boot, more as a Client opens
+         them. Cells stay equal and wrap to new rows; scroll once they're full. */
+      #targets-grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        grid-auto-rows: minmax(220px, 1fr);
+        gap: 12px;
+        min-height: 0;
+        overflow: auto;
+      }
+      #targets-grid .panel {
+        min-height: 0;
+      }
+      .hint code {
+        background: #f3f4f6;
+        padding: 1px 5px;
+        border-radius: 4px;
+      }
+      .tag {
+        font-size: 10px;
+        font-weight: 600;
+        background: #dbeafe;
+        color: #1e40af;
+        border-radius: 4px;
+        padding: 1px 5px;
+      }
+      .grow {
+        flex: 1;
+      }
+      .hint {
+        margin-left: auto;
+        font-size: 11px;
+        color: #6b7280;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
       .panel {
         background: #fff;
@@ -135,25 +172,16 @@
       >
     </header>
     <main>
-      <section class="panel">
-        <div class="panel-head">
-          <b>Target: playground</b>
-          <button id="reload-playground">Reload</button>
-          <button id="toggle-playground">Unpair</button>
-        </div>
-        <iframe id="frame-playground" src="{{APP_ORIGIN}}/" title="playground app"></iframe>
-      </section>
-      <section class="panel">
-        <div class="panel-head">
-          <b>Target: todo</b>
-          <button id="reload-todo">Reload</button>
-          <button id="toggle-todo">Unpair</button>
-        </div>
-        <iframe id="frame-todo" src="{{APP_ORIGIN}}/todo" title="todo app"></iframe>
-      </section>
+      <div id="targets-grid"></div>
       <aside class="side">
         <section class="panel" style="flex: 0 0 auto">
-          <div class="panel-head"><b>Targets (host.targets)</b></div>
+          <div class="panel-head">
+            <b>Targets</b>
+            <span class="hint"
+              >open more:
+              <code>agent-browser --cdp {{RELAY_PORT}} tab new {{APP_ORIGIN}}/page-two</code></span
+            >
+          </div>
           <table>
             <thead>
               <tr>
