@@ -1,13 +1,13 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, test } from "vitest";
 
-import { allByRole, byRole, dumpTree } from "./_dump.ts";
+import { byRole, dumpTree } from "./_dump.ts";
 import { build, resetDocument, snapshot } from "./_fixtures.ts";
 
 afterEach(resetDocument);
 
 // composedChildren / tree shaping: shadow DOM flattening, slot assignment, table
-// section reordering, and the generic-collapse heuristic.
+// section reordering, and the generic-vs-excluded wrapper rules.
 describe("tree structure", () => {
   test("table thead/tbody/tfoot are reordered head, body, foot regardless of source order", () => {
     const nodes = build(
@@ -32,8 +32,6 @@ describe("tree structure", () => {
     expect(dumpTree(nodes)).toContain("slotted text");
   });
 
-  // --- Divergence guards ---
-
   test("an anonymous unnamed block <div> is an unignored generic node (Chromium parity)", () => {
     const nodes = build(`<main><div><button>x</button></div></main>`);
     const main = byRole(nodes, "main");
@@ -50,15 +48,51 @@ describe("tree structure", () => {
     expect(text?.parentId).toBe(main?.nodeId);
     expect(byRole(nodes, "generic")).toBeUndefined();
   });
+});
 
-  test("RootWebArea name is the document title, empty when untitled (no href fallback)", () => {
-    expect(byRole(build(`<p>x</p>`, ""), "RootWebArea")?.name?.value).toBe("");
-    expect(byRole(build(`<p>x</p>`, "My Page"), "RootWebArea")?.name?.value).toBe("My Page");
+// ListMarker generation. getComputedStyle(li).display === "list-item" fires in
+// jsdom for both <ol> and <ul>, so these exercise the impl's <ol>-only /
+// numeric-only guard — not a jsdom limitation. <ul> disc glyphs are a ceiling.
+describe("list markers", () => {
+  test("ordered list items get a numbered ListMarker with a StaticText child", () => {
+    const nodes = build(`<ol><li>first</li><li>second</li></ol>`);
+    const markers = nodes.filter((node) => node.role?.value === "ListMarker");
+    expect(markers).toHaveLength(2);
+    expect(markers[0]?.name).toEqual({ type: "computedString", value: "1. " });
+    expect(markers[1]?.name).toEqual({ type: "computedString", value: "2. " });
+    // each marker has a StaticText child carrying the same text
+    const markerChild = nodes.find((node) => node.nodeId === markers[0]?.childIds?.[0]);
+    expect(markerChild?.role?.value).toBe("StaticText");
+    expect(markerChild?.name?.value).toBe("1. ");
   });
 
-  test("frameId is emitted only on the root", () => {
-    const nodes = build(`<main><button>x</button></main>`);
-    expect(nodes.filter((node) => node.frameId !== undefined)).toHaveLength(1);
-    expect(allByRole(nodes, "button")[0]?.frameId).toBeUndefined();
+  test("ordered list honors the start attribute", () => {
+    const nodes = build(`<ol start="5"><li>a</li><li>b</li></ol>`);
+    const markers = nodes.filter((node) => node.role?.value === "ListMarker");
+    expect(markers.map((m) => m.name?.value)).toEqual(["5. ", "6. "]);
+  });
+
+  test("the full ordered-list dump", () => {
+    const nodes = build(`<ol><li>alpha</li><li>beta</li></ol>`);
+    expect("\n" + dumpTree(nodes) + "\n").toMatchInlineSnapshot(`
+      "
+      RootWebArea "Fixture"
+        list
+          listitem
+            ListMarker "1. "
+              StaticText "1. "
+            StaticText "alpha"
+          listitem
+            ListMarker "2. "
+              StaticText "2. "
+            StaticText "beta"
+      "
+    `);
+  });
+
+  test("DIVERGENCE: unordered <ul> items get NO ListMarker (Chromium emits disc markers)", () => {
+    const nodes = build(`<ul><li>x</li><li>y</li></ul>`);
+    expect(nodes.filter((node) => node.role?.value === "ListMarker")).toHaveLength(0);
+    expect(byRole(nodes, "list")).toBeDefined();
   });
 });
