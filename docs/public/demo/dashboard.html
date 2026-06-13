@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en"><head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Analytics</title>
+  <link rel="stylesheet" href="./demo.css?v=f5961c168a" />
+</head><body>
+  <div class="wrap">
+    <div class="topbar">
+      <div class="mark">A</div>
+      <div>
+        <h1>Analytics</h1>
+        <p>This week</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="tabs">
+        <button id="tab-overview" role="tab" aria-selected="true">Overview</button>
+        <button id="tab-traffic" role="tab" aria-selected="false">Traffic</button>
+        <button id="tab-revenue" role="tab" aria-selected="false">Revenue</button>
+      </div>
+      <div id="panel"></div>
+    </div>
+  </div>
+
+  <script type="module" src="./frame-agent.js?v=f5961c168a"></script>
+  <script>
+    (function () {
+      var panels = {
+        overview: [
+          { label: 'Visitors', value: '12.4k' },
+          { label: 'Signups', value: '318' },
+          { label: 'Churn', value: '1.9%' }
+        ],
+        traffic: [
+          { label: 'Sessions', value: '48.7k' },
+          { label: 'Bounce', value: '41%' },
+          { label: 'Avg time', value: '2m18s' }
+        ],
+        revenue: [
+          { label: 'MRR', value: '$42.1k' },
+          { label: 'New', value: '$6.3k' },
+          { label: 'Refunds', value: '$480' }
+        ]
+      };
+
+      var tabs = {
+        overview: document.getElementById('tab-overview'),
+        traffic: document.getElementById('tab-traffic'),
+        revenue: document.getElementById('tab-revenue')
+      };
+
+      var panelEl = document.getElementById('panel');
+      var currentTab = 'overview';
+
+      function renderPanel(key) {
+        var boxes = panels[key].map(function (box) {
+          return '<div class="box"><span>' + box.label + '</span><strong>' + box.value + '</strong></div>';
+        }).join('');
+        panelEl.innerHTML = '<div class="kpi">' + boxes + '</div>';
+      }
+
+      function selectTab(key) {
+        currentTab = key;
+        Object.keys(tabs).forEach(function (k) {
+          tabs[k].setAttribute('aria-selected', k === key ? 'true' : 'false');
+        });
+        renderPanel(key);
+        console.log('dashboard:tab', key);
+      }
+
+      Object.keys(tabs).forEach(function (key) {
+        tabs[key].addEventListener('click', function () {
+          selectTab(key);
+        });
+      });
+
+      window.dashboardState = function () {
+        return { tab: currentTab };
+      };
+
+      renderPanel('overview');
+    })();
+  </script>
+</body></html>

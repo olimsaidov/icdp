@@ -1,4 +1,22 @@
 /* ---------------------------------------------------------------------------
+   Brand palette — keep the accent purple in *both* themes.
+
+   VitePress's default light ramp already reads purple (#3451b2 and friends),
+   but its dark ramp drives solid fills from `--vp-c-brand-3: #3e63dd`, a
+   saturated blue. That `-3` is what the home hero's "Start the tutorial" button
+   uses (`--vp-button-brand-bg → --vp-c-brand-3`), so the button looked blue in
+   dark mode while everything else looked purple. Nudge the whole dark ramp into
+   the violet it reads as in light mode; light is left on the VitePress default.
+   These same vars feed the mermaid `.hub` accent further down.
+   --------------------------------------------------------------------------- */
+.dark {
+  --vp-c-brand-1: #b8a9ff; /* links / text — violet, AA on dark bg */
+  --vp-c-brand-2: #9e8bf5; /* hover */
+  --vp-c-brand-3: #6e54d9; /* solid button fills (hero button, etc.) */
+  --vp-c-brand-soft: rgba(139, 110, 246, 0.16);
+}
+
+/* ---------------------------------------------------------------------------
    Mermaid diagrams — follow the VitePress theme in both light and dark mode.
    Mermaid ships its own palette (pale node fills, white edge-label boxes, an
    unbounded width); we override it with the site's own CSS variables so the

@@ -3,3 +3,4 @@ dist/
 *.log
 docs/.vitepress/dist/
 docs/.vitepress/cache/
+docs/public/demo/frame-agent.js

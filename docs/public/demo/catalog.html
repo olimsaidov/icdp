@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en"><head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Product catalog</title>
+  <link rel="stylesheet" href="./demo.css?v=f5961c168a" />
+</head><body>
+  <div class="wrap">
+    <div class="topbar">
+      <div class="mark">C</div>
+      <div>
+        <h1>Product catalog</h1>
+        <p>Inventory</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Catalog</h2>
+      <div class="field">
+        <label for="search">Filter products</label>
+        <input id="search" type="text" placeholder="Search…" autocomplete="off" />
+      </div>
+      <div id="results" class="muted">5 of 5 products</div>
+      <table>
+        <thead>
+          <tr><th>Product</th><th>Category</th><th>Price</th></tr>
+        </thead>
+        <tbody id="rows">
+          <tr data-name="pro keyboard"><td>Pro Keyboard</td><td>Peripherals</td><td>$89</td></tr>
+          <tr data-name="studio monitor"><td>Studio Monitor</td><td>Audio</td><td>$349</td></tr>
+          <tr data-name="pro webcam"><td>Pro Webcam</td><td>Video</td><td>$129</td></tr>
+          <tr data-name="mesh router"><td>Mesh Router</td><td>Network</td><td>$159</td></tr>
+          <tr data-name="desk lamp"><td>Desk Lamp</td><td>Lighting</td><td>$39</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <script type="module" src="./frame-agent.js?v=f5961c168a"></script>
+  <script>
+    (function () {
+      var search = document.getElementById("search");
+      var results = document.getElementById("results");
+      var rows = document.getElementById("rows");
+      var all = Array.prototype.slice.call(rows.querySelectorAll("tr"));
+      var total = all.length;
+
+      function render(query) {
+        var q = String(query || "").trim().toLowerCase();
+        var visible = 0;
+        all.forEach(function (tr) {
+          var match = !q || tr.getAttribute("data-name").indexOf(q) !== -1;
+          tr.style.display = match ? "" : "none";
+          if (match) visible++;
+        });
+        results.textContent = visible + " of " + total + " products";
+        console.log("catalog:filter", q, visible);
+      }
+
+      search.addEventListener("input", function () {
+        render(search.value);
+      });
+    })();
+  </script>
+</body></html>

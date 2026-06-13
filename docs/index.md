@@ -52,6 +52,16 @@ flowchart TD
     H -->|"embeds"| F["The app in an iframe"]
 ```
 
+## Try it live
+
+This is **agent-browser — the same automation CLI, compiled to WebAssembly —
+running in your browser**. It drives the iframe over CDP through icdp; there is no
+server and no real browser debugging session. Pick an example and run a command.
+
+<ClientOnly>
+  <LiveDemo />
+</ClientOnly>
+
 ## Which page do I want?
 
 | If you want to…                                   | Go to                                  |

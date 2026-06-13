@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+
 import { defineConfig } from "vitepress";
 import { withMermaid } from "vitepress-plugin-mermaid";
 
@@ -55,7 +57,21 @@ export default withMermaid(
       },
     },
 
-    head: [["meta", { name: "theme-color", content: "#005fb8" }]],
+    head: [["meta", { name: "theme-color", content: "#3451b2" }]],
+
+    vite: {
+      resolve: {
+        alias: {
+          // The live demo drives the repo's own icdp build — dogfood the source.
+          "@olimsaidov/icdp/host": fileURLToPath(
+            new URL("../../src/host/index.ts", import.meta.url),
+          ),
+        },
+      },
+      // agent-browser-wasm resolves its .wasm via new URL(..., import.meta.url);
+      // keep it out of esbuild prebundling so that URL survives to the browser.
+      optimizeDeps: { exclude: ["@olimsaidov/agent-browser-wasm"] },
+    },
 
     themeConfig: {
       // https://vitepress.dev/reference/default-theme-config

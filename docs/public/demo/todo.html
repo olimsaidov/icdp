@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en"><head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tasks</title>
+  <link rel="stylesheet" href="./demo.css?v=f5961c168a" />
+</head><body>
+  <div class="wrap">
+    <div class="topbar">
+      <div class="mark">T</div>
+      <div>
+        <h1>Tasks</h1>
+        <p>Sprint backlog</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Tasks</h2>
+
+      <div class="actions" style="justify-content:flex-start">
+        <input id="new-todo" type="text" placeholder="Add a task…" style="flex:1" />
+        <button id="add">Add</button>
+      </div>
+
+      <div id="count" class="muted" style="margin:10px 0 12px">2 tasks</div>
+
+      <ul class="list" id="list">
+        <li><span>Draft sprint goals</span><span class="pill">todo</span></li>
+        <li><span>Review backlog with team</span><span class="pill">todo</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <script type="module" src="./frame-agent.js?v=f5961c168a"></script>
+  <script>
+    (function () {
+      var input = document.getElementById('new-todo');
+      var addBtn = document.getElementById('add');
+      var list = document.getElementById('list');
+      var count = document.getElementById('count');
+
+      function updateCount() {
+        var n = list.children.length;
+        count.textContent = n + (n === 1 ? ' task' : ' tasks');
+      }
+
+      function addTodo() {
+        var text = input.value.trim();
+        if (!text) return;
+
+        var li = document.createElement('li');
+        var label = document.createElement('span');
+        label.textContent = text;
+        var pill = document.createElement('span');
+        pill.className = 'pill';
+        pill.textContent = 'todo';
+        li.appendChild(label);
+        li.appendChild(pill);
+        list.appendChild(li);
+
+        input.value = '';
+        updateCount();
+        console.log('todo:added', text);
+        input.focus();
+      }
+
+      addBtn.addEventListener('click', addTodo);
+      input.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') addTodo();
+      });
+
+      updateCount();
+    })();
+  </script>
+</body></html>

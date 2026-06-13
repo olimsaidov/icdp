@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en"><head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sign in</title>
+  <link rel="stylesheet" href="./demo.css?v=f5961c168a" />
+</head><body>
+  <div class="wrap">
+    <div class="topbar">
+      <div class="mark">S</div>
+      <div>
+        <h1>Sign in</h1>
+        <p>Welcome back</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Sign in</h2>
+      <div class="field">
+        <label for="email">Email</label>
+        <input id="email" type="email" autocomplete="username" placeholder="you@company.com" />
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input id="password" type="password" autocomplete="current-password" placeholder="Your password" />
+      </div>
+      <div id="error" class="status danger"></div>
+      <div id="welcome" class="status ok"></div>
+      <button id="signin" class="btn" style="width:100%">Sign in</button>
+    </div>
+  </div>
+
+  <script type="module" src="./frame-agent.js?v=f5961c168a"></script>
+  <script>
+    document.getElementById("signin").addEventListener("click", function () {
+      var emailEl = document.getElementById("email");
+      var passwordEl = document.getElementById("password");
+      var errorEl = document.getElementById("error");
+      var welcomeEl = document.getElementById("welcome");
+
+      var email = emailEl.value.trim();
+      var password = passwordEl.value;
+      var ok = false;
+
+      if (!email) {
+        errorEl.textContent = "Enter your email to continue.";
+        welcomeEl.textContent = "";
+      } else if (!password) {
+        errorEl.textContent = "Enter your password.";
+        welcomeEl.textContent = "";
+      } else {
+        errorEl.textContent = "";
+        welcomeEl.textContent = "Signed in as " + email;
+        ok = true;
+      }
+
+      console.log("signin:attempt", { email: email, ok: ok });
+    });
+  </script>
+</body></html>
