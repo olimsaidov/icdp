@@ -1,6 +1,6 @@
 {
   "name": "@olimsaidov/icdp",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Chrome DevTools Protocol over an iframe boundary: drive and inspect embedded (including cross-origin) apps with CDP tools, without a real browser debugging session.",
   "homepage": "https://github.com/olimsaidov/icdp#readme",
   "bugs": "https://github.com/olimsaidov/icdp/issues",
