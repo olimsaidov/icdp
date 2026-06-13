@@ -61,9 +61,12 @@ describe("read-method surface", () => {
       for (const child of node.childIds ?? []) expect(ids.has(child)).toBe(true);
   });
 
-  test("RootWebArea name is the document title, empty when untitled (no href fallback)", () => {
+  test("RootWebArea name is the document title (computedString), empty when untitled", () => {
     expect(byRole(build(`<p>x</p>`, ""), "RootWebArea")?.name?.value).toBe("");
-    expect(byRole(build(`<p>x</p>`, "My Page"), "RootWebArea")?.name?.value).toBe("My Page");
+    // assert the AXValue type as well as the value (no href fallback)
+    const named = byRole(build(`<p>x</p>`, "My Page"), "RootWebArea");
+    expect(named?.name?.type).toBe("computedString");
+    expect(named?.name?.value).toBe("My Page");
   });
 
   test("RootWebArea backendDOMNodeId targets the Document, not <html>", () => {
