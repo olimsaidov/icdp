@@ -38,6 +38,10 @@
       "default": "./dist/protocol.mjs"
     }
   },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "scripts": {
     "build": "tsdown",
     "check": "tsc --noEmit && oxlint && oxfmt --check .",
