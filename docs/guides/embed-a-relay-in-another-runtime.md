@@ -169,12 +169,13 @@ The `upgrade(request)` call is the one runtime-specific piece. Each platform spe
 
 The Node adapter `serveRelay` in `src/relay/node.ts` is the canonical, working implementation of exactly this contract. Read it before you write your own — it is short and every line maps to a rule above:
 
-- It routes `GET /json/version`, `/json`, `/json/list`, and `/icdp/status` to the matching `core.*` payload builder, and sends everything else to a `fallback` (or `404`).
+- Its browser/CDP server routes `GET /json/version`, `/json`, `/json/list`, and `/icdp/status` to the matching `core.*` payload builder.
+- Its Host server routes the Host WebSocket and sends ordinary HTTP requests to `fallback` (or `404`).
 - It routes WebSocket upgrades by path: the browser path becomes a Client, the host path becomes a Host, and any other upgrade is rejected (`socket.destroy()`).
 - It wraps each `ws` once in a `SocketLike` and caches it in a `WeakMap`, so the core sees stable connection identity.
 - It forwards `message` and `close` events to `hostMessage`/`clientMessage` and `hostDisconnected`/`clientDisconnected`.
 
-Your adapter differs only in how it opens sockets and binds the port. The Host/Client split, the path routing, and the `SocketLike` caching carry over unchanged.
+Your adapter differs only in how it opens sockets and binds ports. The Host/Client split, the path routing, and the `SocketLike` caching carry over unchanged.
 
 ::: warning Flat-session protocol only
 The core speaks the [flat-session protocol](/explanation/flat-session-protocol): there are no per-target WebSocket URLs. `jsonList()` advertises one `webSocketDebuggerUrl` — your `browserWsUrl` — for every Target. Clients attach with `Target.attachToTarget` and route by `sessionId`. Do not synthesize per-target URLs in your adapter.

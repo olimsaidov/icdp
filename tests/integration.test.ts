@@ -168,14 +168,26 @@ describe("relay + host + frame, end to end", () => {
   });
 
   test("HTTP discovery endpoints describe the browser endpoint", async () => {
-    const version = (await (await fetch(`http://127.0.0.1:${relay.port}/json/version`)).json()) as {
+    expect(relay.hostPort).not.toBe(relay.browserPort);
+
+    const hostDiscovery = await fetch(`http://127.0.0.1:${relay.hostPort}/json/version`);
+    expect(hostDiscovery.status).toBe(404);
+
+    const hostStatus = await fetch(`http://127.0.0.1:${relay.hostPort}/icdp/status`);
+    expect(hostStatus.status).toBe(404);
+
+    const version = (await (
+      await fetch(`http://127.0.0.1:${relay.browserPort}/json/version`)
+    ).json()) as {
       webSocketDebuggerUrl: string;
       Browser: string;
     };
     expect(version.Browser).toBe("icdp-e2e");
     expect(version.webSocketDebuggerUrl).toBe(relay.browserWsUrl);
 
-    const list = (await (await fetch(`http://127.0.0.1:${relay.port}/json/list`)).json()) as Array<{
+    const list = (await (
+      await fetch(`http://127.0.0.1:${relay.browserPort}/json/list`)
+    ).json()) as Array<{
       id: string;
       webSocketDebuggerUrl: string;
     }>;

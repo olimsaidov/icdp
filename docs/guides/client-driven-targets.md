@@ -40,7 +40,7 @@ const host = new IcdpHost({
   },
 });
 
-host.connectRelay({ url: "ws://127.0.0.1:9222/icdp/host" });
+host.connectRelay({ url: "ws://127.0.0.1:3000/icdp/host" });
 ```
 
 The `url` you pair into must carry the [Frame Agent](/explanation/concepts), and the origin you pass to `pair()` must be on the agent's `allowedParents`; otherwise the handshake never completes and the create rolls back (see below). The Host never injects the agent — the embedded app includes it. See [Embed the Frame Agent](/guides/embed-the-frame-agent).
@@ -69,7 +69,7 @@ With both hooks wired, agent-browser's `tab` commands map straight onto the life
 
 ```sh
 agent-browser --cdp 9222 tab list                                # Target.getTargets
-agent-browser --cdp 9222 tab new http://127.0.0.1:9223/page-two  # Target.createTarget -> new iframe
+agent-browser --cdp 9222 tab new http://127.0.0.1:3001/page-two  # Target.createTarget -> new iframe
 agent-browser --cdp 9222 tab close t3                            # Target.closeTarget -> iframe removed
 ```
 

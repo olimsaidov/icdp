@@ -15,21 +15,21 @@ The Node adapter, `@olimsaidov/icdp/relay/node`, runs on `node:http` + `ws` and 
 ```ts
 import { serveRelay } from "@olimsaidov/icdp/relay/node";
 
-const relay = await serveRelay({ port: 9222 });
+const relay = await serveRelay({ hostPort: 3000, browserPort: 9229 });
 
-console.log(relay.browserWsUrl); // ws://127.0.0.1:9222/devtools/browser  <- Clients connect here
-console.log(relay.hostWsUrl); //   ws://127.0.0.1:9222/icdp/host          <- the Host uplinks here
+console.log(relay.hostWsUrl); //    ws://127.0.0.1:3000/icdp/host          <- the Host uplinks here
+console.log(relay.browserWsUrl); // ws://127.0.0.1:9229/devtools/browser  <- Clients connect here
 ```
 
 `serveRelay` resolves to a `RelayServer` with two URLs that matter:
 
-- `relay.browserWsUrl` — the browser-level CDP endpoint. Hand this to your Client.
 - `relay.hostWsUrl` — the bridge endpoint. Hand this to `host.connectRelay`.
+- `relay.browserWsUrl` — the browser-level CDP endpoint. Hand this to your Client.
 
-The default `hostname` is `127.0.0.1`, the default `browserPath` is `/devtools/browser`, and the default `hostPath` is `/icdp/host`.
+The default `hostHostname` and `browserHostname` are `127.0.0.1`, the default `hostPath` is `/icdp/host`, and the default `browserPath` is `/devtools/browser`.
 
 ::: tip
-Pass `port: 0` (the default) to let the OS assign a free port, then read the real one back from `relay.port`. The same value is already baked into `relay.browserWsUrl` and `relay.hostWsUrl`.
+Pass `hostPort: 0` or `browserPort: 0` (the defaults) to let the OS assign free ports, then read the real values back from `relay.hostPort` and `relay.browserPort`.
 :::
 
 ## Uplink the Host
@@ -52,13 +52,13 @@ A Client connects to `relay.browserWsUrl` and addresses Targets through the [fla
 
 ## Discover Targets over HTTP
 
-The Relay answers Chrome's HTTP discovery routes off the same server, so existing CDP tooling can find the endpoint:
+The Relay answers Chrome's HTTP discovery routes on the browser/CDP server, so existing CDP tooling can find the endpoint without exposing the Host uplink:
 
 - `/json/version` — protocol and product info, including the `webSocketDebuggerUrl`.
 - `/json` and `/json/list` — the current Target list.
 - `/icdp/status` — the Relay's Host/Client/Target state.
 
-Anything else falls through to the optional `fallback` handler, or returns `404`. See [HTTP endpoints](/reference/http-endpoints) for the exact payloads.
+Anything else on the browser/CDP server returns `404`. The optional `fallback` handler is only for ordinary HTTP requests on the Host server, useful when the same public port also serves your shell page. See [HTTP endpoints](/reference/http-endpoints) for the exact payloads.
 
 ## Stop the Relay
 
@@ -66,7 +66,7 @@ Anything else falls through to the optional `fallback` handler, or returns `404`
 await relay.stop();
 ```
 
-`stop()` terminates open WebSockets and closes the HTTP server. It resolves once the server has shut down.
+`stop()` terminates open WebSockets and closes both HTTP servers. It resolves once both servers have shut down.
 
 ## Debugging
 

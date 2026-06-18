@@ -373,6 +373,7 @@ async function createHarness(): Promise<AgentHarness> {
 
   let appOrigin = "";
   let shellOrigin = "";
+  let browserOrigin = "";
 
   const relay = await serveRelay({
     product: "icdp-e2e/0.1",
@@ -390,14 +391,15 @@ async function createHarness(): Promise<AgentHarness> {
   });
   await new Promise<void>((resolve) => appServer.listen(0, "127.0.0.1", resolve));
 
-  shellOrigin = `http://127.0.0.1:${relay.port}`;
+  shellOrigin = `http://127.0.0.1:${relay.hostPort}`;
+  browserOrigin = `http://127.0.0.1:${relay.browserPort}`;
   appOrigin = `http://127.0.0.1:${(appServer.address() as AddressInfo).port}`;
 
   async function status(): Promise<{
     hostConnected: boolean;
     targets: Array<{ targetId: string; url: string }>;
   }> {
-    const response = await fetch(`${shellOrigin}/icdp/status`);
+    const response = await fetch(`${browserOrigin}/icdp/status`);
     return (await response.json()) as {
       hostConnected: boolean;
       targets: Array<{ targetId: string; url: string }>;
@@ -444,7 +446,7 @@ async function createHarness(): Promise<AgentHarness> {
   await waitForTargetUrl((url) => url.startsWith(appOrigin), "frame agent pairing");
 
   // Every target-session command attaches through the Relay's browser endpoint.
-  const cdpArgs = ["--cdp", String(relay.port)];
+  const cdpArgs = ["--cdp", String(relay.browserPort)];
   const run = (args: string[], options?: RunAgentOptions) =>
     runAgent(targetSession, [...cdpArgs, ...args], options);
 

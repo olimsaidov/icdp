@@ -4,7 +4,7 @@ description: "Boot the bundled playground and drive a real cross-origin iframe w
 
 # Tutorial: drive an embedded app end to end
 
-This takes you through the whole icdp chain once, top to bottom. You boot the bundled playground — a shell page that is the [Host](/explanation/concepts), a [Relay](/explanation/concepts) on the same port, and a cross-origin app served as two [Targets](/explanation/concepts) — then drive one of those Targets from outside with the `agent-browser` [Client](/explanation/concepts). By the end you will have snapshotted an accessibility tree, clicked a below-fold control, asserted page state, navigated across documents, opened and closed a Target from the Client, and watched an intentionally unsupported command fail cleanly.
+This takes you through the whole icdp chain once, top to bottom. You boot the bundled playground — a shell page that is the [Host](/explanation/concepts), a [Relay](/explanation/concepts) with separate Host and CDP ports, and a cross-origin app served as two [Targets](/explanation/concepts) — then drive one of those Targets from outside with the `agent-browser` [Client](/explanation/concepts). By the end you will have snapshotted an accessibility tree, clicked a below-fold control, asserted page state, navigated across documents, opened and closed a Target from the Client, and watched an intentionally unsupported command fail cleanly.
 
 Every command here is copy-pasteable and guaranteed to work against a fresh checkout. Follow the links when you want the why.
 
@@ -24,7 +24,7 @@ npm run playground
 
 This bundles the shell and the [Frame Agent](/explanation/concepts), then starts the [full icdp topology](/explanation/architecture) — Client → Relay → Host → Frame Agent — on fixed ports.
 
-The shell page at `http://127.0.0.1:9222` is the Host. It embeds **two cross-origin Targets** served from `http://127.0.0.1:9223`:
+The shell page at `http://127.0.0.1:3000` is the Host. It embeds **two cross-origin Targets** served from `http://127.0.0.1:3001`. The private CDP endpoint listens on port `9222`:
 
 - **`playground`** — a feature-dense app: forms, SPA tabs via `history.pushState`, async zones, console buttons, shadow DOM, a nested `srcdoc` iframe, hidden cases, mouse/scroll boxes, full navigation to `/page-two`, and `window.playgroundState()` for `eval` assertions.
 - **`todo`** — a second Target, so multi-target discovery has something to find.
@@ -32,12 +32,12 @@ The shell page at `http://127.0.0.1:9222` is the Host. It embeds **two cross-ori
 Leave this process running. The terminal prints the shell URL, the cross-origin app origin, and the CDP browser endpoint.
 
 ::: tip
-`ICDP_DEBUG=1 npm run playground` logs all Relay traffic, which is the fastest way to see the flat-session protocol on the wire. Override the port with `ICDP_PLAYGROUND_PORT`.
+`ICDP_DEBUG=1 npm run playground` logs all Relay traffic, which is the fastest way to see the flat-session protocol on the wire. Override ports with `ICDP_PLAYGROUND_HOST_PORT`, `ICDP_PLAYGROUND_CDP_PORT`, and `ICDP_PLAYGROUND_APP_PORT`.
 :::
 
 ## 2. Open the shell in a browser
 
-Open `http://127.0.0.1:9222` in any browser. You are now looking at the Host's own page. Three things to notice:
+Open `http://127.0.0.1:3000` in any browser. You are now looking at the Host's own page. Three things to notice:
 
 - The **targets grid** — one uniform panel per Target. Right now it holds the two boot Targets, `playground` and `todo`.
 - The **live target table** — every Target's `targetId`, title, and URL, updated as Targets are created, reloaded, and destroyed.
@@ -108,7 +108,7 @@ The shell passes `onCreateTarget` / `onCloseTarget` to `IcdpHost`, so a Client c
 
 ```sh
 agent-browser --cdp 9222 tab list                                # Target.getTargets
-agent-browser --cdp 9222 tab new http://127.0.0.1:9223/page-two  # Target.createTarget -> new iframe
+agent-browser --cdp 9222 tab new http://127.0.0.1:3001/page-two  # Target.createTarget -> new iframe
 agent-browser --cdp 9222 tab list
 agent-browser --cdp 9222 tab close t3                            # Target.closeTarget -> iframe removed
 ```

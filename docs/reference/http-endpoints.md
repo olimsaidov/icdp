@@ -4,9 +4,9 @@ description: "The HTTP discovery routes and WebSocket upgrade paths the Relay se
 
 # Relay HTTP endpoints
 
-The [Relay](/explanation/concepts) exposes a Chrome-compatible HTTP discovery surface alongside its WebSocket endpoints. The Node adapter (`serveRelay`, in [src/relay/node.ts](https://github.com/olimsaidov/icdp/blob/master/src/relay/node.ts)) routes GET requests to three JSON payloads and accepts WebSocket upgrades on two paths. The payloads themselves come from `RelayCore` (`jsonVersion()`, `jsonList()`, `status()`), so any runtime adapter built on [RelayCore](/reference/relay) serves the same shapes.
+The [Relay](/explanation/concepts) exposes a Chrome-compatible HTTP discovery surface alongside its WebSocket endpoints. The Node adapter (`serveRelay`, in [src/relay/node.ts](https://github.com/olimsaidov/icdp/blob/master/src/relay/node.ts)) runs two HTTP servers: a browser/CDP server for Client discovery and CDP WebSocket traffic, and a Host server for the Host uplink WebSocket plus optional fallback HTTP. The JSON payloads themselves come from `RelayCore` (`jsonVersion()`, `jsonList()`, `status()`), so any runtime adapter built on [RelayCore](/reference/relay) serves the same shapes.
 
-The four discovery routes below respond with `Content-Type: application/json; charset=utf-8` and HTTP status `200`; any other path is handled by the `fallback` or returns `404` (see below). Set `ICDP_DEBUG=1` to log every HTTP request and WebSocket upgrade.
+The four discovery routes below live on the browser/CDP server. They respond with `Content-Type: application/json; charset=utf-8` and HTTP status `200`; any other browser/CDP HTTP path returns `404`. The Host server does not serve these routes. Set `ICDP_DEBUG=1` to log every HTTP request and WebSocket upgrade.
 
 ## GET routes
 
@@ -17,7 +17,7 @@ The four discovery routes below respond with `Content-Type: application/json; ch
 | `/json/list` | `RelayCore.jsonList()` | Same array as `/json` |
 | `/icdp/status` | `RelayCore.status()` | Relay status snapshot |
 
-Any other path is passed to the optional `fallback` handler, or answered with HTTP `404` and the body `not found`.
+Any other browser/CDP HTTP path is answered with HTTP `404` and the body `not found`. The optional `fallback` handler only runs on the Host server.
 
 ### `GET /json/version`
 
@@ -30,7 +30,7 @@ The browser version descriptor a [Client](/explanation/concepts) reads to discov
   "User-Agent": "icdp/0.1",
   "V8-Version": "synthetic",
   "WebKit-Version": "synthetic",
-  "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/browser"
+  "webSocketDebuggerUrl": "ws://127.0.0.1:9229/devtools/browser"
 }
 ```
 
@@ -55,8 +55,8 @@ Both paths return the same array, one entry per [Target](/explanation/concepts) 
     "id": "playground",
     "title": "Playground",
     "type": "page",
-    "url": "http://127.0.0.1:9223/playground",
-    "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/browser"
+    "url": "http://127.0.0.1:3001/playground",
+    "webSocketDebuggerUrl": "ws://127.0.0.1:9229/devtools/browser"
   }
 ]
 ```
@@ -83,7 +83,7 @@ A snapshot of Relay state, for health checks and the [playground](/) status page
 {
   "hostConnected": true,
   "targets": [
-    { "targetId": "playground", "title": "Playground", "url": "http://127.0.0.1:9223/playground" }
+    { "targetId": "playground", "title": "Playground", "url": "http://127.0.0.1:3001/playground" }
   ],
   "clients": 2
 }
@@ -97,12 +97,12 @@ A snapshot of Relay state, for health checks and the [playground](/) status page
 
 ## WebSocket upgrade paths
 
-The Relay accepts WebSocket upgrades on exactly two paths. Both default values are configurable through `ServeRelayOptions`.
+The Relay accepts WebSocket upgrades on exactly two paths, but they are on different servers. Both default values are configurable through `ServeRelayOptions`.
 
-| Path option | Default | Role | Adapter call |
-| --- | --- | --- | --- |
-| `browserPath` | `/devtools/browser` | Client connection (standard CDP) | `clientConnected` / `clientMessage` / `clientDisconnected` |
-| `hostPath` | `/icdp/host` | Host uplink (bridge protocol) | `hostConnected` / `hostMessage` / `hostDisconnected` |
+| Server | Path option | Default | Role | Adapter call |
+| --- | --- | --- | --- | --- |
+| browser/CDP | `browserPath` | `/devtools/browser` | Client connection (standard CDP) | `clientConnected` / `clientMessage` / `clientDisconnected` |
+| Host | `hostPath` | `/icdp/host` | Host uplink (bridge protocol) | `hostConnected` / `hostMessage` / `hostDisconnected` |
 
 An upgrade on any other path is rejected: the socket is destroyed without an HTTP response. Only one Host is served at a time; a new Host connection drops the previous one (new-wins). The browser path appears verbatim as the `webSocketDebuggerUrl` in `/json/version` and `/json`.
 
@@ -111,9 +111,9 @@ The full URLs are read back from the `RelayServer` returned by `serveRelay`:
 ```ts
 import { serveRelay } from "@olimsaidov/icdp/relay/node";
 
-const relay = await serveRelay({ port: 9222 });
-relay.browserWsUrl; // ws://127.0.0.1:9222/devtools/browser  (Clients)
-relay.hostWsUrl;    // ws://127.0.0.1:9222/icdp/host          (Host uplink)
+const relay = await serveRelay({ hostPort: 3000, browserPort: 9229 });
+relay.hostWsUrl;    // ws://127.0.0.1:3000/icdp/host          (Host uplink)
+relay.browserWsUrl; // ws://127.0.0.1:9229/devtools/browser  (Clients)
 ```
 
-See [the Relay reference](/reference/relay) for the `RelayCore` adapter API and the `ServeRelayOptions` fields that set `port`, `hostname`, `product`, `browserPath`, `hostPath`, and `fallback`.
+See [the Relay reference](/reference/relay) for the `RelayCore` adapter API and the `ServeRelayOptions` fields that set ports, hostnames, paths, advertised URLs, `product`, and `fallback`.

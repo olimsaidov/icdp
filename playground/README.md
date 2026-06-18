@@ -6,7 +6,7 @@ A runnable demo of the full icdp topology, ready to be driven with agent-browser
 npm run playground
 ```
 
-Starts everything on fixed ports: a shell page (Host) at `http://127.0.0.1:9222` embedding **two cross-origin targets** from `http://127.0.0.1:9223`:
+Starts everything on fixed ports: a shell page (Host) at `http://127.0.0.1:3000`, a private CDP endpoint on port `9222`, and **two cross-origin targets** from `http://127.0.0.1:3001`:
 
 - **`playground`** — a feature-dense app: forms of every input type, SPA tabs via `history.pushState`, async zones (delayed lab results, toast, late-appearing button), console buttons, shadow DOM, a nested srcdoc iframe, hidden cases that must _not_ appear in snapshots, mouse pad / scroll boxes / offscreen inputs, full navigation to `/page-two`, and `window.playgroundState()` for `eval` assertions (also rendered live on the page).
 - **`todo`** — a second target, so multi-target discovery (`Target.getTargets`, `/json/list`) has something to find.
@@ -20,7 +20,7 @@ The shell itself shows every target in one uniform grid, a live target table, a 
 Open the shell in any browser, then:
 
 ```sh
-agent-browser open http://127.0.0.1:9222
+agent-browser open http://127.0.0.1:3000
 agent-browser --cdp 9222 wait --text "icdp Playground"   # first command syncs the model
 agent-browser --cdp 9222 snapshot -i
 agent-browser --cdp 9222 scrollintoview "#load-data"     # below-fold targets need this first
@@ -35,8 +35,8 @@ agent-browser's `tab` commands map straight onto the lifecycle methods the shell
 
 ```sh
 agent-browser --cdp 9222 tab list                                # Target.getTargets
-agent-browser --cdp 9222 tab new http://127.0.0.1:9223/page-two  # Target.createTarget -> new iframe
-agent-browser --cdp 9222 tab new http://127.0.0.1:9223/todo
+agent-browser --cdp 9222 tab new http://127.0.0.1:3001/page-two  # Target.createTarget -> new iframe
+agent-browser --cdp 9222 tab new http://127.0.0.1:3001/todo
 agent-browser --cdp 9222 tab close t3                            # Target.closeTarget -> iframe removed
 ```
 
@@ -44,7 +44,7 @@ Each `tab new` appears as another panel in the targets grid, identical to the bo
 
 Things to try: fill the intake form and submit it (the submit logs to the shell console panel), switch SPA tabs and use `wait --url` / `back` / `forward`, race the async buttons with `wait --text` and `wait --fn`, snapshot and confirm the hidden cases are absent, navigate to `/page-two` and back (target identity survives), reload or unpair a target from the shell and watch the target table, open and close Targets from the Client with `tab new` / `tab close`, and run `screenshot` to see it fail gracefully (intentionally unsupported).
 
-`ICDP_DEBUG=1 npm run playground` logs all relay traffic. Status endpoint: `http://127.0.0.1:9222/icdp/status`. Override the port with `ICDP_PLAYGROUND_PORT`.
+`ICDP_DEBUG=1 npm run playground` logs all relay traffic. Status endpoint: `http://127.0.0.1:9222/icdp/status`. Override ports with `ICDP_PLAYGROUND_HOST_PORT`, `ICDP_PLAYGROUND_CDP_PORT`, and `ICDP_PLAYGROUND_APP_PORT`.
 
 ## Quirks to know
 

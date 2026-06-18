@@ -1,9 +1,9 @@
 /**
- * icdp playground: a shell (Host) on the relay's port embedding two
- * cross-origin app targets, ready to be driven with agent-browser.
+ * icdp playground: a shell (Host) on one port, private CDP on another,
+ * embedding two cross-origin app targets ready for agent-browser.
  *
  *   npm run playground
- *   open http://127.0.0.1:9222          <- the shell
+ *   open http://127.0.0.1:3000          <- the shell
  *   agent-browser --cdp 9222 wait --text "icdp Playground"
  */
 import { readFileSync } from "node:fs";
@@ -16,9 +16,10 @@ import { rolldown } from "rolldown";
 import { serveRelay } from "../src/relay/node.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const RELAY_PORT = Number(process.env.ICDP_PLAYGROUND_PORT ?? 9222);
-const APP_PORT = RELAY_PORT + 1;
-const SHELL_ORIGIN = `http://127.0.0.1:${RELAY_PORT}`;
+const HOST_PORT = Number(process.env.ICDP_PLAYGROUND_HOST_PORT ?? 3000);
+const CDP_PORT = Number(process.env.ICDP_PLAYGROUND_CDP_PORT ?? 9222);
+const APP_PORT = Number(process.env.ICDP_PLAYGROUND_APP_PORT ?? HOST_PORT + 1);
+const SHELL_ORIGIN = `http://127.0.0.1:${HOST_PORT}`;
 const APP_ORIGIN = `http://127.0.0.1:${APP_PORT}`;
 
 async function bundleBrowser(input: string): Promise<string> {
@@ -46,12 +47,13 @@ function page(name: string): string {
   return readFileSync(join(here, "pages", name), "utf8")
     .replaceAll("{{APP_ORIGIN}}", APP_ORIGIN)
     .replaceAll("{{SHELL_ORIGIN}}", SHELL_ORIGIN)
-    .replaceAll("{{RELAY_PORT}}", String(RELAY_PORT))
-    .replaceAll("{{RELAY_WS}}", `ws://127.0.0.1:${RELAY_PORT}/icdp/host`);
+    .replaceAll("{{CDP_PORT}}", String(CDP_PORT))
+    .replaceAll("{{RELAY_WS}}", `ws://127.0.0.1:${HOST_PORT}/icdp/host`);
 }
 
 const relay = await serveRelay({
-  port: RELAY_PORT,
+  hostPort: HOST_PORT,
+  browserPort: CDP_PORT,
   product: "icdp-playground/0.1",
   fallback: (request, response) => {
     const url = new URL(request.url ?? "/", SHELL_ORIGIN);
@@ -81,22 +83,22 @@ icdp playground is up.
   shell (open in your browser):   ${SHELL_ORIGIN}
   app (cross-origin, in iframes): ${APP_ORIGIN}
   CDP browser endpoint:           ${relay.browserWsUrl}
-  status:                         ${SHELL_ORIGIN}/icdp/status
+  status:                         http://127.0.0.1:${relay.browserPort}/icdp/status
 
 Drive it with agent-browser (one wait first to sync its page model):
 
   agent-browser open ${SHELL_ORIGIN}              # or open the shell in any browser
-  agent-browser --session cdp --cdp ${RELAY_PORT} wait --text "icdp Playground"
-  agent-browser --session cdp --cdp ${RELAY_PORT} snapshot -i
-  agent-browser --session cdp --cdp ${RELAY_PORT} find role button click --name "Load lab results (1.5s)"
-  agent-browser --session cdp --cdp ${RELAY_PORT} wait --text "Lab results loaded"
-  agent-browser --session cdp --cdp ${RELAY_PORT} eval "window.playgroundState()"
+  agent-browser --session cdp --cdp ${relay.browserPort} wait --text "icdp Playground"
+  agent-browser --session cdp --cdp ${relay.browserPort} snapshot -i
+  agent-browser --session cdp --cdp ${relay.browserPort} find role button click --name "Load lab results (1.5s)"
+  agent-browser --session cdp --cdp ${relay.browserPort} wait --text "Lab results loaded"
+  agent-browser --session cdp --cdp ${relay.browserPort} eval "window.playgroundState()"
 
 Open and close Targets from the Client (Target.createTarget / closeTarget):
 
-  agent-browser --session cdp --cdp ${RELAY_PORT} tab new ${APP_ORIGIN}/page-two
-  agent-browser --session cdp --cdp ${RELAY_PORT} tab list
-  agent-browser --session cdp --cdp ${RELAY_PORT} tab close t3
+  agent-browser --session cdp --cdp ${relay.browserPort} tab new ${APP_ORIGIN}/page-two
+  agent-browser --session cdp --cdp ${relay.browserPort} tab list
+  agent-browser --session cdp --cdp ${relay.browserPort} tab close t3
 
 Things to try: forms, SPA tabs (pushstate/back/forward), async waits, console
 buttons (watch the shell's local console panel), hidden-element snapshots,

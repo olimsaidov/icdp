@@ -159,8 +159,7 @@
       <h1>icdp playground shell (Host)</h1>
       <span>relay: <code>{{SHELL_ORIGIN}}</code></span>
       <span
-        >drive it:
-        <code>agent-browser --cdp {{RELAY_PORT}} wait --text "icdp Playground"</code></span
+        >drive it: <code>agent-browser --cdp {{CDP_PORT}} wait --text "icdp Playground"</code></span
       >
     </header>
     <main>
@@ -171,7 +170,7 @@
             <b>Targets</b>
             <span class="hint"
               >open more:
-              <code>agent-browser --cdp {{RELAY_PORT}} tab new {{APP_ORIGIN}}/page-two</code></span
+              <code>agent-browser --cdp {{CDP_PORT}} tab new {{APP_ORIGIN}}/page-two</code></span
             >
           </div>
           <table>

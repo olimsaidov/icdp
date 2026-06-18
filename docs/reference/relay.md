@@ -15,23 +15,27 @@ For the HTTP discovery routes and WebSocket upgrade paths this page references, 
 ```ts
 import { serveRelay } from "@olimsaidov/icdp/relay/node";
 
-const relay = await serveRelay({ port: 9222 });
+const relay = await serveRelay({ hostPort: 3000, browserPort: 9229 });
 ```
 
 ### `serveRelay(options?): Promise<RelayServer>`
 
-Starts an `http` server that answers the CDP discovery routes over HTTP and upgrades WebSocket connections on two paths: one for Clients, one for the Host uplink. Built on `node:http` and `ws`. Requires Node >= 22. The returned promise resolves once the server is listening.
+Starts two `http` servers: one Host uplink server and one browser/CDP server. The Host server accepts the Host bridge WebSocket and optional fallback HTTP requests. The browser server answers CDP discovery routes and accepts Client WebSocket connections. Built on `node:http` and `ws`. Requires Node >= 22. The returned promise resolves once both servers are listening.
 
 #### `ServeRelayOptions`
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
-| `port` | `number` | `0` | TCP port to listen on. `0` lets the OS assign a free port; read the actual value back from `RelayServer.port`. |
-| `hostname` | `string` | `"127.0.0.1"` | Interface to bind. |
+| `hostPort` | `number` | `0` | Host uplink TCP port. `0` lets the OS assign a free port; read it back from `RelayServer.hostPort`. |
+| `hostHostname` | `string` | `"127.0.0.1"` | Interface for the Host uplink server to bind. |
+| `browserPort` | `number` | `0` | Browser/CDP TCP port. `0` lets the OS assign a free port; read it back from `RelayServer.browserPort`. |
+| `browserHostname` | `string` | `"127.0.0.1"` | Interface for the browser/CDP server to bind. |
 | `product` | `string` | `"icdp/0.1"` | Product string reported by `Browser.getVersion` and `/json/version`. Passed through to `RelayCore`. |
-| `browserPath` | `string` | `"/devtools/browser"` | Path Clients connect to over WebSocket, and the path advertised by `/json/version`. |
 | `hostPath` | `string` | `"/icdp/host"` | Path the Host bridge connects to over WebSocket. |
-| `fallback` | `(request: IncomingMessage, response: ServerResponse) => void` | — | Handles HTTP requests the Relay does not own. Anything other than its WS paths and its `/json` and `/icdp` HTTP routes is passed here; with no `fallback` set, such requests get `404`. |
+| `browserPath` | `string` | `"/devtools/browser"` | Path Clients connect to over WebSocket, and the path advertised by `/json/version`. |
+| `hostWsUrl` | `string` | built from `hostHostname`, `hostPort`, `hostPath` | Public Host uplink URL returned as `RelayServer.hostWsUrl`. Use this when an ingress/proxy URL differs from the bind address. |
+| `browserWsUrl` | `string` | built from `browserHostname`, `browserPort`, `browserPath` | Public browser/CDP URL returned as `RelayServer.browserWsUrl` and advertised in `/json`. |
+| `fallback` | `(request: IncomingMessage, response: ServerResponse) => void` | — | Handles ordinary HTTP requests on the Host server. With no `fallback` set, Host-server HTTP requests get `404`. |
 
 #### `RelayServer`
 
@@ -40,13 +44,15 @@ The resolved object.
 | Member | Type | Description |
 | --- | --- | --- |
 | `core` | `RelayCore` | The underlying core instance the adapter drives. |
-| `server` | `Server` | The Node `http.Server`. |
-| `port` | `number` | The bound TCP port (the resolved value when `port` was `0`). |
-| `browserWsUrl` | `string` | `ws://<hostname>:<port><browserPath>`. Clients connect here. |
-| `hostWsUrl` | `string` | `ws://<hostname>:<port><hostPath>`. The Host uplink connects here. |
-| `stop` | `() => Promise<void>` | Terminates all open sockets, closes the WebSocket server, and closes the HTTP server. Resolves once the server has closed. |
+| `hostServer` | `Server` | The Host uplink HTTP server. |
+| `browserServer` | `Server` | The browser/CDP HTTP server. |
+| `hostPort` | `number` | The bound Host uplink TCP port. |
+| `browserPort` | `number` | The bound browser/CDP TCP port. |
+| `hostWsUrl` | `string` | The Host uplink URL. The Host connects here. |
+| `browserWsUrl` | `string` | The browser/CDP URL. Clients connect here. |
+| `stop` | `() => Promise<void>` | Terminates all open sockets and closes both HTTP servers. Resolves once both servers have closed. |
 
-Clients connect to `browserWsUrl`; the Host's `connectRelay` uplink connects to `hostWsUrl`. These are the only two WebSocket paths the server upgrades. An upgrade on any other path is destroyed.
+Clients connect to `browserWsUrl`; the Host's `connectRelay` uplink connects to `hostWsUrl`. The browser/CDP server owns `/json/version`, `/json`, `/json/list`, `/icdp/status`, and the Client WebSocket. The Host server owns the Host WebSocket and optional `fallback`.
 
 ::: info Debug logging
 With `ICDP_DEBUG=1` in the environment, the adapter logs every HTTP request, every WebSocket upgrade (with its resolved kind: `client`, `host`, or `reject`), and the first 400 characters of every WebSocket frame it receives from a Client or the Host.
@@ -59,7 +65,7 @@ The HTTP routes (`/json/version`, `/json`, `/json/list`, `/icdp/status`) and the
 ```ts
 import { RelayCore } from "@olimsaidov/icdp/relay";
 
-const core = new RelayCore({ browserWsUrl: "ws://127.0.0.1:9222/devtools/browser" });
+const core = new RelayCore({ browserWsUrl: "ws://127.0.0.1:9229/devtools/browser" });
 ```
 
 ### `class RelayCore`
