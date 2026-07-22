@@ -38,23 +38,17 @@ export type RelayServer = {
 };
 
 export type AttachRelayOptions = {
-  /** Register the upgrade listener on this server. Omit to route manually via handleUpgrade. */
-  server?: Server;
-  /** Path Clients connect to, or null to not accept Clients. */
   clientPath?: string | null;
-  /** Path the Host bridge connects to, or null to not accept the Host. */
   hostPath?: string | null;
 };
 
 export type AttachedRelay = {
-  /** Route one upgrade. Returns false — leaving the socket untouched — when the path is not ours. */
   handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): boolean;
-  /** Unregister from the server and terminate every WebSocket this attachment accepted. */
   detach(): void;
 };
 
-// The SocketLike for each ws is created once and cached, so the core can
-// compare connection identities across calls.
+// The SocketLike for each ws is created once and reused via this map, so the
+// core can compare connection identities.
 const socketLikes = new WeakMap<WebSocket, SocketLike>();
 
 function asSocketLike(ws: WebSocket): SocketLike {
@@ -77,7 +71,6 @@ function asSocketLike(ws: WebSocket): SocketLike {
   return like;
 }
 
-/** Wire one accepted WebSocket into the core as a Client or the Host. */
 export function bindWebSocket(core: RelayCore, ws: WebSocket, kind: BindKind): void {
   const like = asSocketLike(ws);
   if (kind === "host") core.hostConnected(like);
@@ -95,11 +88,6 @@ export function bindWebSocket(core: RelayCore, ws: WebSocket, kind: BindKind): v
   ws.on("error", () => ws.close());
 }
 
-/**
- * Answer a CDP discovery request (/json/version, /json, /json/list,
- * /icdp/status). Returns false — without touching the response — for any other
- * path, so it slots into an existing request handler.
- */
 export function handleDiscoveryRequest(
   core: RelayCore,
   request: IncomingMessage,
@@ -121,37 +109,26 @@ export function handleDiscoveryRequest(
   return false;
 }
 
-/**
- * Accept Relay WebSockets on an existing `http` server. Upgrades for paths
- * other than clientPath/hostPath are left untouched, so the attachment
- * composes with other WebSocket routes on the same server. HTTP discovery is
- * separate — wire handleDiscoveryRequest into the server's request handler.
- */
 export function attachRelay(core: RelayCore, options: AttachRelayOptions = {}): AttachedRelay {
   const clientPath =
     options.clientPath === null ? null : (options.clientPath ?? "/devtools/browser");
   const hostPath = options.hostPath === null ? null : (options.hostPath ?? "/icdp/host");
   const wss = new WebSocketServer({ noServer: true });
-
-  const handleUpgrade = (request: IncomingMessage, socket: Duplex, head: Buffer): boolean => {
-    const pathname = new URL(request.url ?? "/", "http://relay").pathname;
-    const kind: BindKind | null =
-      pathname === clientPath ? "client" : pathname === hostPath ? "host" : null;
-    if (!kind) return false;
-    if (process.env.ICDP_DEBUG === "1") console.log(`[icdp:${kind}:http] UPGRADE ${pathname}`);
-    wss.handleUpgrade(request, socket as Socket, head, (ws) => bindWebSocket(core, ws, kind));
-    return true;
-  };
-
-  const listener = (request: IncomingMessage, socket: Duplex, head: Buffer): void => {
-    handleUpgrade(request, socket, head);
-  };
-  options.server?.on("upgrade", listener);
+  let detached = false;
 
   return {
-    handleUpgrade,
+    handleUpgrade(request, socket, head) {
+      if (detached) return false;
+      const pathname = new URL(request.url ?? "/", "http://relay").pathname;
+      const kind: BindKind | null =
+        pathname === clientPath ? "client" : pathname === hostPath ? "host" : null;
+      if (!kind) return false;
+      if (process.env.ICDP_DEBUG === "1") console.log(`[icdp:${kind}:http] UPGRADE ${pathname}`);
+      wss.handleUpgrade(request, socket as Socket, head, (ws) => bindWebSocket(core, ws, kind));
+      return true;
+    },
     detach() {
-      options.server?.removeListener("upgrade", listener);
+      detached = true;
       for (const ws of wss.clients) ws.terminate();
       wss.close();
     },
