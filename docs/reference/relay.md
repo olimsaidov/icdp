@@ -6,7 +6,7 @@ description: "API reference for serveRelay (the Node adapter) and RelayCore (the
 
 The [Relay](/explanation/concepts) is the server that exposes a Chrome-compatible CDP endpoint to external [Clients](/explanation/concepts). It serves exactly one [Host](/explanation/concepts) at a time and forwards [Session](/explanation/concepts)-scoped commands to it.
 
-Two entry points ship: `@olimsaidov/icdp/relay/node` is a ready-made Node `http` + `ws` server, and `@olimsaidov/icdp/relay` is the runtime-agnostic `RelayCore` it is built on. Use the Node adapter unless you are embedding the Relay in another runtime.
+Two entry points ship: `@olimsaidov/icdp/relay/node` is a ready-made Node `http` + `ws` server, and `@olimsaidov/icdp/relay` is the runtime-agnostic `RelayCore` it is built on. Use the Node adapter unless you are embedding the Relay in another runtime. Within the Node adapter, `serveRelay` creates and owns its own servers, while `attachRelay` + `handleDiscoveryRequest` mount the same Relay onto HTTP servers you already run.
 
 For the HTTP discovery routes and WebSocket upgrade paths this page references, see [/reference/http-endpoints](/reference/http-endpoints). For the on-the-wire bridge and CDP message shapes, see [/reference/protocol](/reference/protocol).
 
@@ -57,6 +57,46 @@ Clients connect to `browserWsUrl`; the Host's `connectRelay` uplink connects to 
 ::: info Debug logging
 With `ICDP_DEBUG=1` in the environment, the adapter logs every HTTP request, every WebSocket upgrade (with its resolved kind: `client`, `host`, or `reject`), and the first 400 characters of every WebSocket frame it receives from a Client or the Host.
 :::
+
+### `attachRelay(core, options?): AttachedRelay`
+
+Mounts the Relay's WebSocket endpoints on an `http` server you already run, instead of letting `serveRelay` create its own. Both roles can share one server and one port — or pass `null` for a role's path to split roles across servers (that is exactly how `serveRelay` is built on top of this).
+
+```ts
+import { RelayCore } from "@olimsaidov/icdp/relay";
+import { attachRelay, handleDiscoveryRequest } from "@olimsaidov/icdp/relay/node";
+
+const core = new RelayCore({ browserWsUrl: "ws://127.0.0.1:9229/devtools/browser" });
+const server = createServer((request, response) => {
+  if (handleDiscoveryRequest(core, request, response)) return;
+  // ... your own routes
+});
+attachRelay(core, { server });
+server.listen(9229);
+```
+
+#### `AttachRelayOptions`
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `server` | `Server` | — | Registers the upgrade listener on this server. Omit to route upgrades yourself via `AttachedRelay.handleUpgrade`. |
+| `clientPath` | `string \| null` | `"/devtools/browser"` | Path Clients connect to. `null` disables the Client role on this attachment. |
+| `hostPath` | `string \| null` | `"/icdp/host"` | Path the Host bridge connects to. `null` disables the Host role on this attachment. |
+
+#### `AttachedRelay`
+
+| Member | Type | Description |
+| --- | --- | --- |
+| `handleUpgrade` | `(request, socket, head) => boolean` | Routes one upgrade. Returns `false` — leaving the socket untouched — when the path is not one of this attachment's, so it composes with other WebSocket routes: `if (!attached.handleUpgrade(request, socket, head)) socket.destroy()`. |
+| `detach` | `() => void` | Unregisters the upgrade listener and terminates every WebSocket this attachment accepted. Upgrades arriving after `detach` are nobody's responsibility — keep a catch-all listener that destroys unhandled sockets if you detach dynamically. |
+
+### `handleDiscoveryRequest(core, request, response): boolean`
+
+Answers a CDP discovery request — `/json/version`, `/json`, `/json/list`, `/icdp/status` — from your own request handler. Returns `false` without touching the response for any other path. Discovery is deliberately separate from `attachRelay`: Node runs every `request` listener, so the adapter cannot safely hook HTTP routes onto a server it does not own.
+
+### `bindWebSocket(core, ws, kind): void`
+
+The lowest layer: wires one already-accepted `ws` WebSocket into the core as `"client"` or `"host"` — message routing, disconnect notification, and error handling. Use it when you run your own `WebSocketServer` (for example to inspect the upgrade request before accepting).
 
 The HTTP routes (`/json/version`, `/json`, `/json/list`, `/icdp/status`) and the WebSocket upgrade behavior are documented in [/reference/http-endpoints](/reference/http-endpoints). For a runnable setup, see [/guides/run-a-relay](/guides/run-a-relay).
 
