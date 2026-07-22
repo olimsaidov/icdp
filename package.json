@@ -57,6 +57,7 @@
     "test:all": "vitest run"
   },
   "dependencies": {
+    "@types/ws": "^8",
     "aria-query": "^5.3.2",
     "chobitsu": "1.8.6",
     "devtools-protocol": "^0.0.1624250",
@@ -67,7 +68,6 @@
     "@olimsaidov/agent-browser-wasm": "^0.27.3",
     "@types/aria-query": "^5.0.4",
     "@types/node": "^24",
-    "@types/ws": "^8",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "jsdom": "^29.1.1",
