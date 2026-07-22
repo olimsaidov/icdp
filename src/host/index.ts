@@ -81,6 +81,7 @@ export type RelayUplinkOptions = {
 };
 
 const TARGET_NOT_CONNECTED = "Target is not connected: the Frame Agent has not paired yet.";
+const CONSUMER_DETACHED = "Consumer detached";
 
 function methodDomain(method: string): string {
   return method.split(".")[0] ?? method;
@@ -183,21 +184,30 @@ export class IcdpHost {
       listeners: new Set(),
     };
     pairing.localSessions.set(state.key, state);
+    let detached = false;
 
     return {
       send: (method, params = {}) =>
         new Promise((resolve, reject) => {
+          if (detached) {
+            reject(Object.assign(new Error(CONSUMER_DETACHED), { code: CDP_SERVER_ERROR }));
+            return;
+          }
           this.dispatch(pairing, state.key, method, params, (result, error) => {
             if (error) reject(Object.assign(new Error(error.message), { code: error.code }));
             else resolve(result);
           });
         }),
       onEvent: (listener) => {
+        if (detached) return () => {};
         state.listeners.add(listener);
         return () => state.listeners.delete(listener);
       },
       detach: () => {
+        if (detached) return;
+        detached = true;
         pairing.localSessions.delete(state.key);
+        state.listeners.clear();
         this.releaseEnables(pairing, state.key);
       },
     };
@@ -206,10 +216,11 @@ export class IcdpHost {
   /** Connect the Relay uplink. Structurally just another consumer of this hub. */
   connectRelay(options: RelayUplinkOptions): () => void {
     this.uplink?.close();
-    this.uplink = new RelayUplink(this, options);
+    const uplink = new RelayUplink(this, options);
+    this.uplink = uplink;
     return () => {
-      this.uplink?.close();
-      this.uplink = null;
+      uplink.close();
+      if (this.uplink === uplink) this.uplink = null;
     };
   }
 
@@ -409,13 +420,17 @@ export class IcdpHost {
     this.dispatch(pairing, consumerKey, method, params, settle);
   }
 
-  /** Drop a consumer's enable refs; send disables to the frame for domains it held last. */
+  /** Drop a consumer's pending calls and enable refs; disable domains it held last. */
   releaseEnables(pairing: Pairing, consumerKey: string): void {
+    for (const [commandId, call] of pairing.pending) {
+      if (call.consumerKey !== consumerKey) continue;
+      pairing.pending.delete(commandId);
+      call.settle(undefined, { code: CDP_SERVER_ERROR, message: CONSUMER_DETACHED });
+    }
     for (const [domain, holders] of pairing.enables) {
       if (!holders.delete(consumerKey)) continue;
       if (holders.size === 0 && pairing.port) {
         const commandId = pairing.nextCommandId++;
-        pairing.pending.set(commandId, { consumerKey, settle: () => {} });
         pairing.port.postMessage(
           JSON.stringify({ id: commandId, method: `${domain}.disable`, params: {} }),
         );
@@ -433,6 +448,7 @@ class RelayUplink {
   private socket: WebSocket | null = null;
   private closed = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  private readonly consumers = new Map<string, string>();
 
   constructor(
     private readonly host: IcdpHost,
@@ -447,7 +463,7 @@ class RelayUplink {
     const socket = factory(this.options.url);
     this.socket = socket;
     socket.addEventListener("open", () => {
-      this.send({
+      this.sendOn(socket, {
         kind: "ready",
         v: PROTOCOL_VERSION,
         targets: this.host.targets(),
@@ -455,11 +471,14 @@ class RelayUplink {
       });
     });
     socket.addEventListener("message", (event) => {
+      if (this.socket !== socket || this.closed) return;
       const message = parseJson<RelayToHostMessage>(String(event.data));
-      if (message) this.handleRelayMessage(message);
+      if (message) this.handleRelayMessage(socket, message);
     });
     socket.addEventListener("close", () => {
-      if (this.socket === socket) this.socket = null;
+      if (this.socket !== socket) return;
+      this.socket = null;
+      this.releaseConsumers();
       this.scheduleReconnect();
     });
     socket.addEventListener("error", () => socket.close());
@@ -476,8 +495,16 @@ class RelayUplink {
   close(): void {
     this.closed = true;
     if (this.reconnectTimer !== undefined) clearTimeout(this.reconnectTimer);
+    this.releaseConsumers();
     this.socket?.close();
     this.socket = null;
+  }
+
+  private releaseConsumers(): void {
+    for (const [consumerKey, targetId] of this.consumers) {
+      this.host.releaseEnablesFor(targetId, consumerKey);
+    }
+    this.consumers.clear();
   }
 
   private send(message: HostToRelayMessage): void {
@@ -486,15 +513,23 @@ class RelayUplink {
     }
   }
 
-  private handleRelayMessage(message: RelayToHostMessage): void {
+  private sendOn(socket: WebSocket, message: HostToRelayMessage): void {
+    if (this.socket === socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify(message));
+    }
+  }
+
+  private handleRelayMessage(socket: WebSocket, message: RelayToHostMessage): void {
     if (message.kind === "command") {
+      const consumerKey = `relay-${message.sessionId}`;
+      this.consumers.set(consumerKey, message.targetId);
       this.host.dispatchTo(
         message.targetId,
-        `relay-${message.sessionId}`,
+        consumerKey,
         message.method,
         message.params,
         (result, error) => {
-          this.send({
+          this.sendOn(socket, {
             kind: "response",
             sessionId: message.sessionId,
             id: message.id,
@@ -503,12 +538,14 @@ class RelayUplink {
         },
       );
     } else if (message.kind === "detached") {
-      this.host.releaseEnablesFor(message.targetId, `relay-${message.sessionId}`);
+      const consumerKey = `relay-${message.sessionId}`;
+      this.host.releaseEnablesFor(message.targetId, consumerKey);
+      this.consumers.delete(consumerKey);
     } else if (message.kind === "browserRequest") {
       this.host.handleBrowserRequest(message.method, message.params).then(
-        (result) => this.send({ kind: "browserResult", id: message.id, result }),
+        (result) => this.sendOn(socket, { kind: "browserResult", id: message.id, result }),
         (error: unknown) =>
-          this.send({
+          this.sendOn(socket, {
             kind: "browserResult",
             id: message.id,
             error: {

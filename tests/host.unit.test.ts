@@ -1,6 +1,11 @@
 import { describe, expect, test, vi } from "vitest";
 
-import { type FrameElementLike, IcdpHost, type WindowLike } from "../src/host/index.ts";
+import {
+  type FrameElementLike,
+  IcdpHost,
+  type IcdpHostOptions,
+  type WindowLike,
+} from "../src/host/index.ts";
 
 const FRAME_ORIGIN = "http://app.test";
 
@@ -47,10 +52,39 @@ function fakeIframe() {
   };
 }
 
+class FakeSocket extends EventTarget {
+  readonly sent: string[] = [];
+  readyState: number = WebSocket.CONNECTING;
+
+  send(data: string): void {
+    this.sent.push(data);
+  }
+
+  open(): void {
+    this.readyState = WebSocket.OPEN;
+    this.dispatchEvent(new Event("open"));
+  }
+
+  message(message: unknown): void {
+    this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(message) }));
+  }
+
+  close(): void {
+    if (this.readyState === WebSocket.CLOSED) return;
+    this.readyState = WebSocket.CLOSED;
+    this.dispatchEvent(new Event("close"));
+  }
+}
+
 /** Pair an iframe and complete the handshake; returns the frame-side port. */
-async function connect(options: { origins?: string[] | "*" } = {}) {
+async function connect(
+  options: {
+    origins?: string[] | "*";
+    host?: Omit<IcdpHostOptions, "window">;
+  } = {},
+) {
   const { win, emit } = fakeWindow();
-  const host = new IcdpHost(win);
+  const host = new IcdpHost({ ...options.host, window: win });
   const frame = fakeIframe();
   host.pair(frame.iframe, { targetId: "preview", origins: options.origins ?? [FRAME_ORIGIN] });
 
@@ -168,6 +202,21 @@ describe("local sessions", () => {
     const session = host.attach("preview");
     await expect(session.send("DOM.getDocument")).rejects.toThrow("not connected");
   });
+
+  test("detach rejects the session's pending commands", async () => {
+    const { host, received } = await connect();
+    const session = host.attach("preview");
+    const pending = session.send("Runtime.evaluate", { expression: "1" });
+
+    session.detach();
+
+    await expect(pending).rejects.toThrow("Consumer detached");
+    await expect(session.send("Runtime.evaluate", { expression: "2" })).rejects.toThrow(
+      "Consumer detached",
+    );
+    await flush();
+    expect(received).toHaveLength(1);
+  });
 });
 
 describe("enable ref-counting", () => {
@@ -272,6 +321,108 @@ describe("pairing lifecycle", () => {
 
     // No channel yet, so the load is a chance to re-elicit the agent's hello.
     expect(countProbes()).toBe(before + 1);
+  });
+});
+
+describe("relay uplink lifecycle", () => {
+  test("disconnect releases consumers and drops responses from the old socket", async () => {
+    let finishBrowserRequest!: () => void;
+    const browserRequest = new Promise<void>((resolve) => {
+      finishBrowserRequest = resolve;
+    });
+    const { host, framePort, received } = await connect({
+      host: { onCloseTarget: () => browserRequest },
+    });
+
+    const sockets: FakeSocket[] = [];
+    host.connectRelay({
+      url: "ws://relay.test/icdp/host",
+      reconnectDelayMs: 0,
+      webSocketFactory: () => {
+        const socket = new FakeSocket();
+        sockets.push(socket);
+        return socket as unknown as WebSocket;
+      },
+    });
+
+    const first = sockets[0];
+    if (!first) throw new Error("first socket was not created");
+    first.open();
+    first.message({
+      kind: "command",
+      sessionId: "s1",
+      targetId: "preview",
+      id: 11,
+      method: "Runtime.enable",
+      params: {},
+    });
+    first.message({
+      kind: "command",
+      sessionId: "s1",
+      targetId: "preview",
+      id: 12,
+      method: "Runtime.evaluate",
+      params: { expression: "1" },
+    });
+    first.message({
+      kind: "browserRequest",
+      id: 21,
+      method: "Target.closeTarget",
+      params: { targetId: "preview" },
+    });
+    await flush();
+    const evaluate = received.find((message) => message.method === "Runtime.evaluate");
+    if (!evaluate) throw new Error("evaluate command did not reach the frame");
+
+    first.close();
+    first.message({
+      kind: "command",
+      sessionId: "stale",
+      targetId: "preview",
+      id: 13,
+      method: "DOM.getDocument",
+      params: {},
+    });
+    await flush();
+    expect(received.at(-1)?.method).toBe("Runtime.disable");
+    expect(received.some((message) => message.method === "DOM.getDocument")).toBe(false);
+
+    const second = sockets[1];
+    if (!second) throw new Error("second socket was not created");
+    second.open();
+    framePort.postMessage(JSON.stringify({ id: evaluate.id, result: { value: 1 } }));
+    finishBrowserRequest();
+    await flush();
+
+    expect(second.sent.some((raw) => JSON.parse(raw).id === 12)).toBe(false);
+    expect(second.sent.some((raw) => JSON.parse(raw).kind === "browserResult")).toBe(false);
+
+    framePort.close();
+    host.destroy();
+  });
+
+  test("an old disconnect callback cannot close a replacement uplink", () => {
+    const { win } = fakeWindow();
+    const host = new IcdpHost(win);
+    const sockets: FakeSocket[] = [];
+    const openRelay = () =>
+      host.connectRelay({
+        url: "ws://relay.test/icdp/host",
+        webSocketFactory: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket as unknown as WebSocket;
+        },
+      });
+
+    const disconnectOld = openRelay();
+    const disconnectCurrent = openRelay();
+    disconnectOld();
+
+    expect(sockets[1]?.readyState).toBe(WebSocket.CONNECTING);
+    disconnectCurrent();
+    expect(sockets[1]?.readyState).toBe(WebSocket.CLOSED);
+    host.destroy();
   });
 });
 

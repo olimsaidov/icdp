@@ -47,6 +47,7 @@ The following hold for a call that is not a no-op (the page is embedded and the 
 - Installs a console bridge. It wraps `console` methods (`clear`, `debug`, `dir`, `error`, `group`, `groupCollapsed`, `groupEnd`, `info`, `log`, `table`, `warn`) so each call still runs the original and also emits a `Runtime.consoleAPICalled` event.
 - Posts a [`hello`](/reference/protocol) (`{ icdp: "hello", v, title, url }`) to `window.parent`. The message is posted to each origin in `allowedParents`, or to `"*"` when `allowedParents` is `"*"`.
 - Retries the `hello` announcement up to 10 times at 300ms intervals. Retrying stops as soon as a command channel is adopted, or after the tenth attempt.
+- Re-announces on a persisted `pageshow`, so a document restored from the back/forward cache receives a fresh Host channel.
 
 ### Handshake
 

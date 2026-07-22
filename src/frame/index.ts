@@ -1055,6 +1055,9 @@ export function startFrameAgent(options: FrameAgentOptions): void {
 
   installConsoleBridge();
   announce(allowed);
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted) announce(allowed);
+  });
 
   let attempts = 0;
   const retry = window.setInterval(() => {

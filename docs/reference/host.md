@@ -83,6 +83,7 @@ Attaches a local consumer to a Target with no server in the path. Returns a [`Lo
 
 - **Throws** for an unknown `targetId` (`Unknown target "<id>"`).
 - `LocalSession.send()` rejects with an `Error` carrying a numeric `.code` when the frame returns a CDP error.
+- `LocalSession.detach()` rejects in-flight and future commands with `Consumer detached`.
 
 See [Local console panel](/guides/local-console-panel).
 
@@ -92,7 +93,7 @@ See [Local console panel](/guides/local-console-panel).
 connectRelay(options: RelayUplinkOptions): () => void
 ```
 
-Opens the Relay uplink, structurally just another consumer of this hub. Returns a disconnect function. Replaces any existing uplink (the previous one is closed first). The uplink auto-reconnects on close, with a default delay of 500 ms (see [`RelayUplinkOptions`](#relayuplinkoptions)). On connect it announces a `ready` message carrying the current targets and the advertised handled methods.
+Opens the Relay uplink, structurally just another consumer of this hub. Returns a disconnect function for that uplink. Replaces any existing uplink (the previous one is closed first). The uplink auto-reconnects on close, with a default delay of 500 ms (see [`RelayUplinkOptions`](#relayuplinkoptions)). On connect it announces a `ready` message carrying the current targets and the advertised handled methods.
 
 ### handledMethods
 
@@ -152,7 +153,7 @@ type LocalSession = {
 | --- | --- | --- |
 | `send` | `(method, params?) => Promise<unknown>` | Sends a CDP command to the Target. Resolves with the result, or rejects with an `Error` whose `.code` carries the CDP error code. `params` defaults to `{}`. |
 | `onEvent` | `(listener) => () => void` | Subscribes to CDP events from the Target. Returns an unsubscribe function. |
-| `detach` | `() => void` | Removes this Session and releases its ref-counted domain enables. |
+| `detach` | `() => void` | Removes this Session, rejects its pending and future commands, and releases its ref-counted domain enables. |
 
 ### TargetEvent
 
@@ -218,6 +219,7 @@ type WindowLike = {
 
 - **Pairing-owned identity.** The `targetId` belongs to the Pairing, not the iframe element or its document. Reloads, remounts, and cross-app navigations keep the same `targetId`, surfaced as a `targetInfoChanged` event (and as `Page.frameNavigated` to Clients). Only `unpair()` destroys the Target. See [Target lifecycle](/explanation/target-lifecycle).
 - **Document death fails commands.** Commands in flight when a document dies fail fast with CDP error code `-32000` and are never replayed. A second `hello` (a reload) fails pending commands with reason `Target reloaded` and re-opens the channel; `unpair()` fails them with reason `Target destroyed`.
+- **Consumer death fails commands.** Detaching a local Session or losing the Relay uplink rejects that consumer's pending commands, releases its domain enables, and never delivers an old socket's eventual response to a replacement socket.
 - **Ref-counted enables.** Domain enables are ref-counted per Target across consumers, so the Relay's `enable` and a local panel's `enable` coexist. A `.disable` is only forwarded to the frame when the last holder releases the domain; detaching a Session releases its holds.
 - **New-wins uplink.** `connectRelay()` replaces any existing uplink. On the Relay side, a newly connecting Host takes over from a stale one.
 
