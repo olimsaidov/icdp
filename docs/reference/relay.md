@@ -62,7 +62,11 @@ With `ICDP_DEBUG=1` in the environment, the adapter logs every HTTP request, eve
 
 Mounts the Relay's WebSocket endpoints on an `http` server you already run, instead of letting `serveRelay` create its own. Both roles can share one server and one port — or pass `null` for a role's path to split roles across servers (that is exactly how `serveRelay` is built on top of this).
 
+The attachment registers no listeners of its own: route upgrades from your single caller-owned dispatcher, and destroy whatever nothing claims. One dispatcher matters — Node invokes **every** `upgrade` listener for every upgrade, so independent listeners fight over the socket (ws's own server-attached mode aborts handshakes on paths it does not recognize), and an upgrade that no listener claims is never destroyed by Node: it stays open indefinitely.
+
 ```ts
+import { createServer } from "node:http";
+
 import { RelayCore } from "@olimsaidov/icdp/relay";
 import { attachRelay, handleDiscoveryRequest } from "@olimsaidov/icdp/relay/node";
 
@@ -71,7 +75,12 @@ const server = createServer((request, response) => {
   if (handleDiscoveryRequest(core, request, response)) return;
   // ... your own routes
 });
-attachRelay(core, { server });
+const attached = attachRelay(core);
+server.on("upgrade", (request, socket, head) => {
+  if (attached.handleUpgrade(request, socket, head)) return;
+  // ... offer the upgrade to your other WebSocket routes here ...
+  socket.destroy();
+});
 server.listen(9229);
 ```
 
@@ -79,7 +88,6 @@ server.listen(9229);
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
-| `server` | `Server` | — | Registers the upgrade listener on this server. Omit to route upgrades yourself via `AttachedRelay.handleUpgrade`. |
 | `clientPath` | `string \| null` | `"/devtools/browser"` | Path Clients connect to. `null` disables the Client role on this attachment. |
 | `hostPath` | `string \| null` | `"/icdp/host"` | Path the Host bridge connects to. `null` disables the Host role on this attachment. |
 
@@ -87,8 +95,8 @@ server.listen(9229);
 
 | Member | Type | Description |
 | --- | --- | --- |
-| `handleUpgrade` | `(request, socket, head) => boolean` | Routes one upgrade. Returns `false` — leaving the socket untouched — when the path is not one of this attachment's, so it composes with other WebSocket routes: `if (!attached.handleUpgrade(request, socket, head)) socket.destroy()`. |
-| `detach` | `() => void` | Unregisters the upgrade listener and terminates every WebSocket this attachment accepted. Upgrades arriving after `detach` are nobody's responsibility — keep a catch-all listener that destroys unhandled sockets if you detach dynamically. |
+| `handleUpgrade` | `(request, socket, head) => boolean` | Routes one upgrade. Returns `false` — leaving the socket untouched — when the path is not one of this attachment's, or after `detach`, so the dispatcher decides the fate of every socket exactly once. |
+| `detach` | `() => void` | Stops accepting (subsequent `handleUpgrade` calls return `false`) and terminates every WebSocket this attachment accepted. |
 
 ### `handleDiscoveryRequest(core, request, response): boolean`
 
