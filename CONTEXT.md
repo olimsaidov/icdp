@@ -1,6 +1,8 @@
 # icdp
 
-A library that provides the Chrome DevTools Protocol over an iframe boundary, so external CDP tools (agent-browser, Playwright, chrome-remote-interface) can drive and inspect an app embedded in an iframe — including cross-origin iframes — without a real browser debugging session.
+A library that provides a cooperative Chrome DevTools Protocol subset over an
+iframe boundary, so any compatible CDP Client can drive and inspect an embedded
+app — including a cross-origin iframe — without a browser debugging session.
 
 ## Language
 
@@ -9,18 +11,28 @@ The script running inside the iframe'd app that emulates CDP domains against the
 _Avoid_: driver, bridge (the prior art's names for it)
 
 **Host**:
-The hub of the system: code in the parent window that pairs with Frame Agents and fans CDP sessions out to consumers. The Relay uplink is structurally just another consumer; parent-window code (e.g. a console panel) can attach to Targets locally without any server. Events broadcast to all attached sessions; domain enables are ref-counted per Target.
+The hub of the system: code in the parent window that pairs with Frame Agents
+and owns Targets, Clients, and Sessions. The Relay uplink carries remote Client
+traffic; parent-window code (for example, a console panel) can attach locally
+without a server. Domain state, frontend node ids, Runtime handles, and events
+belong to one Session.
 _Avoid_: shell, parent connector
 
 **Relay**:
-The server component exposing a Chrome-compatible CDP endpoint (`/json/version`, `/devtools/page/...`) that external clients attach to. Serves exactly one Host at a time; a newly connecting Host takes over from a stale one (new-wins), with target destroy/create events emitted to attached Clients.
+The server component exposing HTTP discovery, one browser-level CDP WebSocket,
+and direct per-Target CDP WebSockets. It carries raw messages and Target
+snapshots but does not own protocol state. It serves exactly one validated
+Host at a time.
 _Avoid_: server, facade, proxy
 
 **Client**:
-An external CDP-speaking tool (agent-browser, Playwright, chrome-remote-interface) that connects to the Relay over WebSocket.
+Any CDP-speaking implementation that connects to the Relay's browser endpoint
+with flat Target Sessions or to a direct Target endpoint.
 
 **Target**:
-One iframe pairing as seen by Clients. Addressed exclusively via the flat-session protocol (`Target.attachToTarget` + `sessionId` routing on the single browser-level endpoint); there are no per-target WebSocket URLs.
+One iframe pairing as seen by Clients. Addressed either through the browser
+endpoint's flat-session protocol (`Target.attachToTarget` + `sessionId`) or
+through its Chromium-style direct `/devtools/page/<targetId>` endpoint.
 
 **Pairing**:
 The Host-side slot an iframe occupies. Target identity belongs to the Pairing, not the iframe element or its document: reloads, remounts, and cross-app navigations keep the same targetId (surfaced as `Page.frameNavigated`); only the Host destroying the Pairing destroys the Target. Commands in flight when a document dies fail fast with a CDP error — they are never replayed.

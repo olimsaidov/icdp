@@ -3,8 +3,8 @@ layout: home
 
 hero:
   name: icdp
-  text: Chrome DevTools Protocol over an iframe boundary
-  tagline: Drive and inspect an embedded — even cross-origin — app with real CDP tools, without a real browser debugging session.
+  text: Chromium-shaped CDP for iframe apps
+  tagline: Inspect and drive a cooperative embedded app without opening a browser debugging port.
   actions:
     - theme: brand
       text: Start the tutorial
@@ -20,14 +20,14 @@ features:
   - title: Works across origins
     details: The embedded app opts in with a small script and answers commands against its own live page. Nothing is injected from outside, so it works even when the iframe is on a different origin than the page around it.
     link: /guides/embed-the-frame-agent
-  - title: No real browser required
-    details: Ordinary page JavaScript answers the commands, so the whole thing runs anywhere a page exists — headless tests, CI, even jsdom — with no Chromium and no debugging session.
+  - title: No debugging port
+    details: Ordinary page JavaScript answers the document-facing commands. The browser running the app does not expose a remote-debugging session.
     link: /explanation/architecture
   - title: No server required
     details: Code in the parent page can drive and read the embedded app directly. A console panel or debug overlay works with no server anywhere in the path.
     link: /guides/local-console-panel
   - title: Works with the tools you know
-    details: It speaks the standard Chrome DevTools Protocol, so existing tools connect as they are — agent-browser is fully supported, and chrome-remote-interface and Playwright over CDP connect too.
+    details: Clients connect through Chromium's flat-session message shapes. Commands outside the explicit supported subset return protocol errors.
     link: /explanation/flat-session-protocol
   - title: Survives reloads and navigation
     details: Reloads and page-to-page navigation keep your handle on the app, so you don't re-attach after every transition. A command caught mid-navigation fails cleanly instead of running against the wrong page.
@@ -39,24 +39,23 @@ features:
 
 ## How it works
 
-A CDP automation tool drives an app running inside an iframe — even a cross-origin
-one — with no real browser debugging session. Your tool speaks standard Chrome
-DevTools Protocol to a small web server; the server connects to the web page that
-hosts the iframe; that page passes each command into the embedded app, which runs
-it against its own live DOM.
+A CDP automation tool drives an app running inside an iframe, including a
+cross-origin one, with no browser debugging session. The Relay carries raw CDP;
+the Host owns Targets and Sessions; the embedded Frame Agent implements the
+document-facing subset against its own live DOM.
 
 ```mermaid
 flowchart TD
-    C["agent-browser / Playwright"] -->|"speaks CDP"| R["Web server"]
-    R -->|"connects to"| H["Your web page"]
-    H -->|"embeds"| F["The app in an iframe"]
+    C["CDP Client"] -->|"raw CDP"| R["Relay"]
+    R -->|"client id + raw CDP"| H["Host in your page"]
+    H -->|"session-scoped MessagePort"| F["Frame Agent in the iframe"]
 ```
 
 ## Try it live
 
-This is **agent-browser — the same automation CLI, compiled to WebAssembly —
-running in your browser**. It drives the iframe over CDP through icdp; there is no
-server and no real browser debugging session. Pick an example and run a command.
+The demo uses **agent-browser compiled to WebAssembly** as one real CDP Client.
+It drives the iframe through icdp entirely inside this page; the library itself
+remains Client-independent.
 
 <ClientOnly>
   <LiveDemo />

@@ -4,7 +4,11 @@ description: "How icdp synthesizes a Chromium-shaped accessibility tree from the
 
 # The accessibility tree
 
-A [Client](/explanation/concepts) addresses elements through the [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/), and for an accessibility-driven Client the protocol surface that matters most is the `Accessibility` domain. agent-browser's `snapshot -i` reads it, and its semantic locators — `find role button --name "Save"` — resolve against it. So the accessibility (AX) tree is not a peripheral feature of icdp: it is the addressing layer. If the tree icdp returns does not match what a real Chromium browser would have returned, the Client cannot find, name, or click the element, and nothing downstream works.
+A [Client](/explanation/concepts) can address elements through the
+[Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/)
+`Accessibility` domain. Snapshot tools, semantic locators, and accessibility
+inspectors all depend on its roles, names, properties, and node relationships.
+If those differ from Chromium, every Client observes the wrong document model.
 
 This page explains why the [Frame Agent](/explanation/concepts) builds an AX tree at all, how it builds one, and how its shape is held to a Chromium-equivalent standard. For the method signatures and behavior, see the [frame reference](/reference/frame) and the [CDP support matrix](/reference/cdp-support).
 
@@ -14,7 +18,12 @@ In a real CDP session the AX tree comes from the browser's own accessibility eng
 
 The Frame Agent runs *inside* the iframe'd app, where it does have the one thing the AX tree is computed from: the live DOM, with its attributes, ARIA, labels, and shadow roots all reachable. It therefore synthesizes the CDP `Accessibility` tree in page JavaScript, walking the real document and computing each node's role, accessible name, properties, and parent/child relationships the way Chromium would.
 
-The bar is deliberate. icdp does not aim to reproduce every nuance of Chromium's accessibility implementation; it aims to reproduce the shape agent-browser depends on — roles, accessible names, the ignored/included distinction, and the tree structure that semantic locators traverse. Cases that a layout-less, single-frame DOM fundamentally cannot reproduce (such as `InlineTextBox` leaves, which require layout, and cross-frame iframe sections) are treated as a known ceiling rather than a target.
+The bar is deliberately Client-independent: supported methods should reproduce
+Chromium's wire semantics for roles, accessible names, ignored/included nodes,
+properties, and tree structure. Cases that a layout-less, single-frame DOM
+fundamentally cannot reproduce (such as `InlineTextBox` leaves, which require
+layout, and cross-frame iframe sections) are treated as a known ceiling rather
+than tailored around one consumer.
 
 ## How the tree is built
 
@@ -60,4 +69,10 @@ After a Chromium sync, or when adding a case, the vendored expected output is re
 
 ## Known divergences
 
-icdp reproduces Chromium's accessibility output closely enough to pass the vendored goldens, but it is a synthesis, not the engine, and a small number of Chromium behaviors are knowingly out of reach or knowingly approximated. Where icdp deviates, the divergence is documented at the point of deviation in `ax-tree.ts` rather than hidden — the comments there are the authoritative record of where the synthesized tree and a real Chromium tree part ways, and the ceiling cases above are the clearest examples. The practical consequence is the same one stated at the top: the compatibility contract is agent-browser's support matrix. Within that matrix the tree is held to the goldens; outside it, fidelity is best-effort and not promised.
+icdp reproduces Chromium's accessibility output closely enough to pass the
+vendored goldens, but it is a synthesis, not the engine, and some Chromium
+behavior remains out of reach or approximated. Those divergences are documented
+at the relevant code and in the ceiling cases above. The
+[support matrix](/reference/cdp-support) is the availability contract; the
+Chromium-derived fixtures and method tests are the behavioral contract for every
+Client.

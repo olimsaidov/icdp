@@ -1,11 +1,10 @@
+import { parseCdpCommand } from "../cdp-dispatch.ts";
 import {
-  CDP_METHOD_NOT_FOUND,
   CDP_SERVER_ERROR,
-  type CdpId,
   type CdpMessage,
   type HostToRelayMessage,
-  PROTOCOL_VERSION,
   parseJson,
+  PROTOCOL_VERSION,
   type RelayToHostMessage,
   type TargetSummary,
 } from "../protocol.ts";
@@ -17,230 +16,215 @@ export type SocketLike = {
 };
 
 export type RelayCoreOptions = {
-  /** Reported by Browser.getVersion and /json/version. */
+  /** Reported by /json/version. */
   product?: string;
-  /** Absolute WebSocket URL of the browser endpoint, for /json payloads. */
+  /** Absolute WebSocket URL of the browser endpoint, for /json/version. */
   browserWsUrl?: string;
-  /** How long to wait for the Host to answer a forwarded browser-level request
-   *  before failing the Client. Backstops a silent or hung Host. */
-  browserRequestTimeoutMs?: number;
+  /** Absolute direct WebSocket URL advertised for one Target in /json/list. */
+  targetWsUrl?: (targetId: string) => string;
 };
 
 type ClientState = {
+  id: string;
   socket: SocketLike;
-  autoAttach: boolean;
-  discoverTargets: boolean;
-  sessions: Set<string>;
+  targetId?: string;
 };
 
-type SessionState = {
-  sessionId: string;
-  targetId: string;
-  client: ClientState;
-};
-
-type PendingCommand = {
-  client: ClientState;
-  clientId: CdpId | undefined;
-  sessionId: string;
-};
-
-/** Sentinel: the method was handled and a response was already sent. */
-const RESPONDED = Symbol("responded");
-
-/** Browser-domain methods a Host may take ownership of via the ready `handles`.
- *  Registry methods (getTargets/attachToTarget/setAutoAttach/...) stay relay-owned:
- *  they read the Relay's own session/target state, so the Host can't answer them. */
-const FORWARDABLE_BROWSER_METHODS = new Set(["Target.createTarget", "Target.closeTarget"]);
-
+/**
+ * Runtime-agnostic Relay transport.
+ *
+ * CDP targets and sessions belong to the Host. The Relay only multiplexes raw
+ * Client messages by connection id and caches Host target summaries for HTTP
+ * discovery.
+ */
 export class RelayCore {
   private readonly product: string;
   private readonly browserWsUrl: string;
+  private readonly targetWsUrl?: (targetId: string) => string;
   private hostSocket: SocketLike | null = null;
+  private hostReady = false;
+  private hostReadyComplete = false;
+  private hostInstanceId: string | null = null;
+  private contenderSocket: SocketLike | null = null;
   private readonly clients = new Map<SocketLike, ClientState>();
-  private readonly sessions = new Map<string, SessionState>();
+  private readonly clientsById = new Map<string, ClientState>();
   private readonly targets = new Map<string, TargetSummary>();
-  private readonly pending = new Map<number, PendingCommand>();
-  /** Browser-level requests forwarded to the Host, awaiting a result. */
-  private readonly browserPending = new Map<
-    number,
-    {
-      client: ClientState;
-      clientId: CdpId | undefined;
-      /** Echoed back if the Client scoped the request to a session. */
-      sessionId: string | undefined;
-      timer: ReturnType<typeof setTimeout>;
-    }
-  >();
-  /** Browser-level methods the Host advertised it handles (from the ready message). */
-  private readonly hostHandles = new Set<string>();
-  private readonly browserRequestTimeoutMs: number;
-  private nextBridgeId = 1;
-  private nextSessionId = 1;
 
   constructor(options: RelayCoreOptions = {}) {
-    this.product = options.product ?? "icdp/0.1";
+    this.product = options.product ?? "icdp/0.5.0";
     this.browserWsUrl = options.browserWsUrl ?? "";
-    this.browserRequestTimeoutMs = options.browserRequestTimeoutMs ?? 30_000;
+    this.targetWsUrl = options.targetWsUrl;
   }
 
-  // -- adapter wiring ---------------------------------------------------------
-
-  /** A Host bridge connected. New-wins: any previous Host is dropped. */
   hostConnected(socket: SocketLike): void {
+    if (this.hostSocket && this.hostReady && this.hostSocket !== socket) {
+      if (this.contenderSocket && this.contenderSocket !== socket) {
+        try {
+          this.contenderSocket.close(1008, "replaced by a newer host contender");
+        } catch {}
+      }
+      this.contenderSocket = socket;
+      return;
+    }
     if (this.hostSocket && this.hostSocket !== socket) {
       const previous = this.hostSocket;
       this.hostSocket = null;
-      this.dropAllTargets("Host replaced by a newer connection");
+      this.targets.clear();
       try {
         previous.close(1008, "replaced by a newer host");
       } catch {}
     }
     this.hostSocket = socket;
+    this.hostReady = false;
+    this.hostReadyComplete = false;
   }
 
   hostDisconnected(socket: SocketLike): void {
+    if (this.contenderSocket === socket) {
+      this.contenderSocket = null;
+      return;
+    }
     if (this.hostSocket !== socket) return;
     this.hostSocket = null;
-    this.hostHandles.clear();
-    this.failBrowserPending("Host disconnected");
-    this.dropAllTargets("Host disconnected");
-  }
-
-  hostMessage(socket: SocketLike, raw: string): void {
-    if (this.hostSocket !== socket) return;
-    const message = parseJson<HostToRelayMessage>(raw);
-    if (!message) return;
-    switch (message.kind) {
-      case "ready":
-        this.dropAllTargets("Host re-announced");
-        this.hostHandles.clear();
-        for (const handled of message.handles ?? [])
-          if (FORWARDABLE_BROWSER_METHODS.has(handled)) this.hostHandles.add(handled);
-        for (const target of message.targets) this.addTarget(target);
-        return;
-      case "targetCreated":
-        this.addTarget(message.target);
-        return;
-      case "targetDestroyed":
-        this.removeTarget(message.targetId, "Target destroyed");
-        return;
-      case "targetInfoChanged": {
-        this.targets.set(message.target.targetId, message.target);
-        this.broadcastTargetEvent("Target.targetInfoChanged", {
-          targetInfo: this.targetInfo(message.target),
-        });
-        return;
-      }
-      case "response": {
-        const id = Number(message.id);
-        const call = this.pending.get(id);
-        if (!call) return;
-        this.pending.delete(id);
-        this.sendToClient(call.client, {
-          id: call.clientId,
-          sessionId: call.sessionId,
-          ...(message.error ? { error: message.error } : { result: message.result ?? {} }),
-        });
-        return;
-      }
-      case "event": {
-        for (const session of this.sessions.values()) {
-          if (session.targetId !== message.targetId) continue;
-          this.sendToClient(session.client, {
-            method: message.method,
-            params: message.params,
-            sessionId: session.sessionId,
-          });
-        }
-        return;
-      }
-      case "browserResult": {
-        const call = this.browserPending.get(message.id);
-        if (!call) return;
-        this.browserPending.delete(message.id);
-        clearTimeout(call.timer);
-        this.sendToClient(call.client, {
-          id: call.clientId,
-          ...(call.sessionId ? { sessionId: call.sessionId } : {}),
-          ...(message.error ? { error: message.error } : { result: message.result ?? {} }),
-        });
-        return;
-      }
+    this.hostReady = false;
+    this.hostReadyComplete = false;
+    this.targets.clear();
+    if (this.contenderSocket) {
+      this.hostSocket = this.contenderSocket;
+      this.contenderSocket = null;
     }
   }
 
-  clientConnected(socket: SocketLike): void {
-    this.clients.set(socket, {
+  hostMessage(socket: SocketLike, raw: string): void {
+    const isContender = this.contenderSocket === socket;
+    if (this.hostSocket !== socket && !isContender) return;
+    const message = parseJson<HostToRelayMessage>(raw);
+    if (!message) return;
+
+    if (message.kind === "ready") {
+      if (
+        message.v !== PROTOCOL_VERSION ||
+        typeof message.instanceId !== "string" ||
+        !Array.isArray(message.targets) ||
+        !message.targets.every(
+          (target) =>
+            typeof target === "object" &&
+            target !== null &&
+            typeof target.targetId === "string" &&
+            typeof target.title === "string" &&
+            typeof target.url === "string",
+        )
+      ) {
+        if (isContender) {
+          this.contenderSocket = null;
+        } else {
+          this.hostSocket = null;
+          this.hostReady = false;
+          this.hostReadyComplete = false;
+          this.targets.clear();
+        }
+        socket.close(1002, "Incompatible host protocol");
+        return;
+      }
+      if (isContender) {
+        const previous = this.hostSocket;
+        this.hostSocket = socket;
+        this.contenderSocket = null;
+        try {
+          previous?.close(1008, "replaced by a newer host");
+        } catch {}
+      }
+      if (this.hostInstanceId !== null && this.hostInstanceId !== message.instanceId) {
+        this.closeClientsForHostReplacement();
+      }
+      this.hostInstanceId = message.instanceId;
+      this.hostReady = true;
+      this.hostReadyComplete = false;
+      this.targets.clear();
+      for (const target of message.targets) this.targets.set(target.targetId, target);
+      this.syncClients();
+      return;
+    }
+    if (!this.hostReady || this.hostSocket !== socket) return;
+
+    switch (message.kind) {
+      case "readyComplete":
+        if (this.hostReadyComplete) return;
+        this.hostReadyComplete = true;
+        this.closeClientsForMissingTargets();
+        this.syncClients();
+        return;
+      case "targetCreated":
+      case "targetInfoChanged":
+        if (
+          typeof message.target?.targetId !== "string" ||
+          typeof message.target.title !== "string" ||
+          typeof message.target.url !== "string"
+        ) {
+          return;
+        }
+        this.targets.set(message.target.targetId, message.target);
+        return;
+      case "targetDestroyed":
+        if (typeof message.targetId !== "string") return;
+        this.targets.delete(message.targetId);
+        this.closeTargetClients(message.targetId);
+        return;
+      case "clientMessage":
+        if (typeof message.clientId !== "string" || typeof message.message !== "string") return;
+        {
+          const client = this.clientsById.get(message.clientId);
+          if (client) this.sendRawToClient(client, message.message);
+        }
+        return;
+      default:
+        return;
+    }
+  }
+
+  clientConnected(socket: SocketLike, targetId?: string): void {
+    if (targetId !== undefined && !this.targets.has(targetId)) {
+      socket.close(1008, "Target not found");
+      return;
+    }
+    const client = {
+      id: `icdp-client-${globalThis.crypto.randomUUID()}`,
       socket,
-      autoAttach: false,
-      discoverTargets: false,
-      sessions: new Set(),
-    });
+      ...(targetId === undefined ? {} : { targetId }),
+    };
+    this.clients.set(socket, client);
+    this.clientsById.set(client.id, client);
+    this.syncClients();
   }
 
   clientDisconnected(socket: SocketLike): void {
     const client = this.clients.get(socket);
     if (!client) return;
     this.clients.delete(socket);
-    for (const sessionId of client.sessions) this.endSession(sessionId, { notifyClient: false });
-    // Drop any browser-level request still in flight for this gone Client.
-    for (const [id, call] of this.browserPending) {
-      if (call.client !== client) continue;
-      this.browserPending.delete(id);
-      clearTimeout(call.timer);
-    }
+    this.clientsById.delete(client.id);
+    this.syncClients();
   }
 
   clientMessage(socket: SocketLike, raw: string): void {
     const client = this.clients.get(socket);
     if (!client) return;
-    const message = parseJson<CdpMessage>(raw);
-    if (!message) return;
-
-    // Browser-domain lifecycle methods the Host advertised it handles → forward
-    // and await its result, instead of using the relay's built-in default below.
-    // These are not session-scoped, so we honour them whether or not the Client
-    // attached a sessionId (any sessionId is only echoed back on the response).
-    if (message.method && this.hostHandles.has(message.method) && this.hostSocket) {
-      const bridgeId = this.nextBridgeId++;
-      this.browserPending.set(bridgeId, {
-        client,
-        clientId: message.id,
-        sessionId: message.sessionId,
-        timer: this.armBrowserTimeout(bridgeId),
-      });
-      this.sendToHost({
-        kind: "browserRequest",
-        id: bridgeId,
-        method: message.method,
-        params: message.params ?? {},
-      });
+    if (this.hostSocket && this.hostReady) {
+      this.sendToHost({ kind: "clientMessage", clientId: client.id, message: raw });
       return;
     }
 
-    if (message.sessionId) {
-      this.routeSessionCommand(client, message);
+    const parsed = parseCdpCommand(raw);
+    if (!parsed.ok) {
+      this.sendToClient(client, parsed.response);
       return;
     }
-
-    const local = this.browserLevelResult(client, message);
-    if (local === RESPONDED) return;
-    if (local !== undefined) {
-      this.sendToClient(client, { id: message.id, result: local });
-      return;
-    }
-
+    const request = parsed.command;
     this.sendToClient(client, {
-      id: message.id,
-      error: {
-        code: CDP_METHOD_NOT_FOUND,
-        message: `Method not available on the browser target: ${message.method ?? "<missing>"}. Attach to a target and send it with a sessionId.`,
-      },
+      id: request.id,
+      ...(request.sessionId ? { sessionId: request.sessionId } : {}),
+      error: { code: CDP_SERVER_ERROR, message: "Host is not connected" },
     });
   }
-
-  // -- HTTP discovery payloads --------------------------------------------------
 
   jsonVersion(): Record<string, unknown> {
     return {
@@ -261,38 +245,58 @@ export class RelayCore {
       title: target.title,
       type: "page",
       url: target.url,
-      // Flat-session protocol only: attach via Target.attachToTarget on the browser endpoint.
-      webSocketDebuggerUrl: this.browserWsUrl,
+      ...(this.targetWsUrl ? { webSocketDebuggerUrl: this.targetWsUrl(target.targetId) } : {}),
     }));
   }
 
   status(): { hostConnected: boolean; targets: TargetSummary[]; clients: number } {
     return {
-      hostConnected: this.hostSocket !== null,
+      hostConnected: this.hostSocket !== null && this.hostReady,
       targets: Array.from(this.targets.values()),
       clients: this.clients.size,
     };
   }
 
-  // -- internals ------------------------------------------------------------
-
-  private targetInfo(target: TargetSummary) {
-    return {
-      targetId: target.targetId,
-      type: "page",
-      title: target.title,
-      url: target.url,
-      attached: Array.from(this.sessions.values()).some(
-        (session) => session.targetId === target.targetId,
-      ),
-      canAccessOpener: false,
-    };
+  private syncClients(): void {
+    if (!this.hostReady) return;
+    const targetIds = Object.fromEntries(
+      Array.from(this.clientsById.values())
+        .filter(
+          (client): client is ClientState & { targetId: string } => client.targetId !== undefined,
+        )
+        .map((client) => [client.id, client.targetId]),
+    );
+    this.sendToHost({
+      kind: "clients",
+      clientIds: Array.from(this.clientsById.keys()),
+      ...(Object.keys(targetIds).length === 0 ? {} : { targetIds }),
+    });
   }
 
-  private sendToClient(client: ClientState, message: CdpMessage): void {
-    try {
-      client.socket.send(JSON.stringify(message));
-    } catch {}
+  private closeTargetClients(targetId: string): void {
+    const clients = Array.from(this.clients.values()).filter(
+      (client) => client.targetId === targetId,
+    );
+    if (clients.length === 0) return;
+    for (const client of clients) {
+      this.clients.delete(client.socket);
+      this.clientsById.delete(client.id);
+      try {
+        client.socket.close(1001, "Target closed");
+      } catch {}
+    }
+    this.syncClients();
+  }
+
+  private closeClientsForMissingTargets(): void {
+    for (const client of Array.from(this.clients.values())) {
+      if (client.targetId === undefined || this.targets.has(client.targetId)) continue;
+      this.clients.delete(client.socket);
+      this.clientsById.delete(client.id);
+      try {
+        client.socket.close(1001, "Target closed");
+      } catch {}
+    }
   }
 
   private sendToHost(message: RelayToHostMessage): void {
@@ -301,307 +305,24 @@ export class RelayCore {
     } catch {}
   }
 
-  private failBrowserPending(reason: string): void {
-    for (const [id, call] of this.browserPending) {
-      this.browserPending.delete(id);
-      clearTimeout(call.timer);
-      this.sendToClient(call.client, {
-        id: call.clientId,
-        ...(call.sessionId ? { sessionId: call.sessionId } : {}),
-        error: { code: CDP_SERVER_ERROR, message: reason },
-      });
+  private closeClientsForHostReplacement(): void {
+    const clients = Array.from(this.clients.values());
+    this.clients.clear();
+    this.clientsById.clear();
+    for (const client of clients) {
+      try {
+        client.socket.close(1012, "Host instance replaced");
+      } catch {}
     }
   }
 
-  /** Bound a forwarded browser request so a silent or hung Host can't pin a
-   *  Client's command open forever (and leak the pending entry). */
-  private armBrowserTimeout(bridgeId: number): ReturnType<typeof setTimeout> {
-    const timer = setTimeout(
-      () => this.expireBrowserPending(bridgeId),
-      this.browserRequestTimeoutMs,
-    );
-    // Don't keep a Node event loop alive just for this backstop.
-    (timer as { unref?: () => void }).unref?.();
-    return timer;
+  private sendToClient(client: ClientState, message: CdpMessage): void {
+    this.sendRawToClient(client, JSON.stringify(message));
   }
 
-  private expireBrowserPending(bridgeId: number): void {
-    const call = this.browserPending.get(bridgeId);
-    if (!call) return;
-    this.browserPending.delete(bridgeId);
-    this.sendToClient(call.client, {
-      id: call.clientId,
-      ...(call.sessionId ? { sessionId: call.sessionId } : {}),
-      error: {
-        code: CDP_SERVER_ERROR,
-        message: "Host did not respond to the browser-level request in time",
-      },
-    });
-  }
-
-  private broadcastTargetEvent(method: string, params: Record<string, unknown>): void {
-    for (const client of this.clients.values()) {
-      if (!client.discoverTargets) continue;
-      this.sendToClient(client, { method, params });
-    }
-  }
-
-  private addTarget(target: TargetSummary): void {
-    this.targets.set(target.targetId, target);
-    this.broadcastTargetEvent("Target.targetCreated", { targetInfo: this.targetInfo(target) });
-    for (const client of this.clients.values()) {
-      if (client.autoAttach) this.startSession(client, target.targetId);
-    }
-  }
-
-  private removeTarget(targetId: string, reason: string): void {
-    if (!this.targets.delete(targetId)) return;
-    for (const session of Array.from(this.sessions.values())) {
-      if (session.targetId === targetId)
-        this.endSession(session.sessionId, { notifyClient: true, failReason: reason });
-    }
-    this.broadcastTargetEvent("Target.targetDestroyed", { targetId });
-  }
-
-  private dropAllTargets(reason: string): void {
-    for (const targetId of Array.from(this.targets.keys())) this.removeTarget(targetId, reason);
-  }
-
-  private startSession(client: ClientState, targetId: string): SessionState {
-    const session: SessionState = {
-      sessionId: `icdp-session-${this.nextSessionId++}`,
-      targetId,
-      client,
-    };
-    this.sessions.set(session.sessionId, session);
-    client.sessions.add(session.sessionId);
-    const target = this.targets.get(targetId);
-    if (target) {
-      this.sendToClient(client, {
-        method: "Target.attachedToTarget",
-        params: {
-          sessionId: session.sessionId,
-          targetInfo: this.targetInfo(target),
-          waitingForDebugger: false,
-        },
-      });
-    }
-    return session;
-  }
-
-  private endSession(
-    sessionId: string,
-    options: { notifyClient: boolean; failReason?: string },
-  ): void {
-    const session = this.sessions.get(sessionId);
-    if (!session) return;
-    this.sessions.delete(sessionId);
-    session.client.sessions.delete(sessionId);
-
-    for (const [bridgeId, call] of this.pending) {
-      if (call.sessionId !== sessionId) continue;
-      this.pending.delete(bridgeId);
-      if (options.notifyClient) {
-        this.sendToClient(session.client, {
-          id: call.clientId,
-          sessionId,
-          error: { code: CDP_SERVER_ERROR, message: options.failReason ?? "Session detached" },
-        });
-      }
-    }
-
-    if (options.notifyClient) {
-      this.sendToClient(session.client, {
-        method: "Target.detachedFromTarget",
-        params: { sessionId, targetId: session.targetId },
-      });
-    }
-    this.sendToHost({ kind: "detached", sessionId, targetId: session.targetId });
-  }
-
-  private routeSessionCommand(client: ClientState, message: CdpMessage): void {
-    const sessionId = message.sessionId as string;
-    const session = this.sessions.get(sessionId);
-    if (!session || session.client !== client) {
-      this.sendToClient(client, {
-        id: message.id,
-        sessionId,
-        error: { code: CDP_SERVER_ERROR, message: `Session not found: ${sessionId}` },
-      });
-      return;
-    }
-    if (!message.method) {
-      this.sendToClient(client, {
-        id: message.id,
-        sessionId,
-        error: { code: CDP_METHOD_NOT_FOUND, message: "Method not found: <missing>" },
-      });
-      return;
-    }
-
-    // Target/Browser housekeeping arrives session-scoped from real clients
-    // (e.g. agent-browser sends Target.setAutoAttach inside the session); the
-    // Frame Agent knows nothing about targets, so answer here.
-    const local = this.sessionLevelResult(session, message);
-    if (local !== undefined) {
-      this.sendToClient(client, { id: message.id, sessionId, result: local });
-      return;
-    }
-
-    if (!this.hostSocket) {
-      this.sendToClient(client, {
-        id: message.id,
-        sessionId,
-        error: { code: CDP_SERVER_ERROR, message: "Host is not connected" },
-      });
-      return;
-    }
-
-    const bridgeId = this.nextBridgeId++;
-    this.pending.set(bridgeId, { client, clientId: message.id, sessionId });
-    this.sendToHost({
-      kind: "command",
-      sessionId,
-      targetId: session.targetId,
-      id: bridgeId,
-      method: message.method,
-      params: message.params ?? {},
-    });
-  }
-
-  /** Session-scoped methods the Relay answers itself; undefined = forward to the frame. */
-  private sessionLevelResult(session: SessionState, message: CdpMessage): unknown | undefined {
-    switch (message.method) {
-      case "Browser.getVersion":
-        return {
-          protocolVersion: "1.3",
-          product: this.product,
-          revision: `icdp-v${PROTOCOL_VERSION}`,
-          userAgent: this.product,
-          jsVersion: "synthetic",
-        };
-      case "Schema.getDomains":
-        return { domains: [] };
-      case "Target.setAutoAttach":
-      case "Target.setDiscoverTargets":
-      case "Target.setRemoteLocations":
-      case "Target.activateTarget":
-        return {};
-      case "Target.getTargetInfo": {
-        const target = this.targets.get(session.targetId);
-        if (!target)
-          return {
-            targetInfo: {
-              targetId: session.targetId,
-              type: "page",
-              title: "",
-              url: "",
-              attached: true,
-            },
-          };
-        return { targetInfo: this.targetInfo(target) };
-      }
-      default:
-        return undefined;
-    }
-  }
-
-  /** Browser-level methods the Relay answers itself; undefined = not local. */
-  private browserLevelResult(
-    client: ClientState,
-    message: CdpMessage,
-  ): unknown | typeof RESPONDED | undefined {
-    switch (message.method) {
-      case "Browser.getVersion":
-        return {
-          protocolVersion: "1.3",
-          product: this.product,
-          revision: `icdp-v${PROTOCOL_VERSION}`,
-          userAgent: this.product,
-          jsVersion: "synthetic",
-        };
-      case "Browser.close":
-      case "Browser.setDownloadBehavior":
-      case "Browser.setWindowBounds":
-      case "Security.setIgnoreCertificateErrors":
-      case "Target.setRemoteLocations":
-      case "Target.activateTarget":
-        return {};
-      // CDP's Target.closeTarget returns { success }. This default applies only
-      // when no Host advertised the method (otherwise it's forwarded above).
-      case "Target.closeTarget":
-        return { success: true };
-      case "Schema.getDomains":
-        return { domains: [] };
-      case "Target.getTargets":
-        return {
-          targetInfos: Array.from(this.targets.values(), (target) => this.targetInfo(target)),
-        };
-      case "Target.getTargetInfo": {
-        const targetId = String(message.params?.targetId ?? "");
-        const target = this.targets.get(targetId);
-        if (!target)
-          return { targetInfo: { targetId, type: "page", title: "", url: "", attached: false } };
-        return { targetInfo: this.targetInfo(target) };
-      }
-      case "Target.setDiscoverTargets": {
-        const discover = Boolean(message.params?.discover);
-        client.discoverTargets = discover;
-        if (discover) {
-          for (const target of this.targets.values()) {
-            this.sendToClient(client, {
-              method: "Target.targetCreated",
-              params: { targetInfo: this.targetInfo(target) },
-            });
-          }
-        }
-        return {};
-      }
-      case "Target.setAutoAttach": {
-        const autoAttach = Boolean(message.params?.autoAttach);
-        client.autoAttach = autoAttach;
-        if (autoAttach) {
-          for (const target of this.targets.values()) {
-            const attachedHere = Array.from(client.sessions).some(
-              (sessionId) => this.sessions.get(sessionId)?.targetId === target.targetId,
-            );
-            if (!attachedHere) this.startSession(client, target.targetId);
-          }
-        }
-        return {};
-      }
-      case "Target.attachToTarget": {
-        const targetId = String(message.params?.targetId ?? "");
-        if (!this.targets.has(targetId)) {
-          this.sendToClient(client, {
-            id: message.id,
-            error: {
-              code: CDP_SERVER_ERROR,
-              message: `No target with given id found: ${targetId}`,
-            },
-          });
-          return RESPONDED;
-        }
-        const session = this.startSession(client, targetId);
-        return { sessionId: session.sessionId };
-      }
-      case "Target.detachFromTarget": {
-        const sessionId = String(message.params?.sessionId ?? "");
-        this.endSession(sessionId, { notifyClient: false });
-        return {};
-      }
-      case "Target.createTarget":
-        this.sendToClient(client, {
-          id: message.id,
-          error: {
-            code: CDP_SERVER_ERROR,
-            message:
-              "Target.createTarget is not supported: icdp targets are iframes paired by the Host.",
-          },
-        });
-        return RESPONDED;
-      default:
-        return undefined;
-    }
+  private sendRawToClient(client: ClientState, message: string): void {
+    try {
+      client.socket.send(message);
+    } catch {}
   }
 }

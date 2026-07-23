@@ -1,10 +1,10 @@
 /**
  * icdp playground: a shell (Host) on one port, private CDP on another,
- * embedding two cross-origin app targets ready for agent-browser.
+ * embedding two cross-origin app Targets for any flat-session CDP Client.
  *
  *   npm run playground
  *   open http://127.0.0.1:3000          <- the shell
- *   agent-browser --cdp 9222 wait --text "icdp Playground"
+ *   node playground/cdp-client.mjs      <- raw CDP sample
  */
 import { readFileSync } from "node:fs";
 import { createServer, type ServerResponse } from "node:http";
@@ -85,20 +85,13 @@ icdp playground is up.
   CDP browser endpoint:           ${relay.browserWsUrl}
   status:                         http://127.0.0.1:${relay.browserPort}/icdp/status
 
-Drive it with agent-browser (one wait first to sync its page model):
+Inspect it through raw flat-session CDP:
 
-  agent-browser open ${SHELL_ORIGIN}              # or open the shell in any browser
-  agent-browser --session cdp --cdp ${relay.browserPort} wait --text "icdp Playground"
-  agent-browser --session cdp --cdp ${relay.browserPort} snapshot -i
-  agent-browser --session cdp --cdp ${relay.browserPort} find role button click --name "Load lab results (1.5s)"
-  agent-browser --session cdp --cdp ${relay.browserPort} wait --text "Lab results loaded"
-  agent-browser --session cdp --cdp ${relay.browserPort} eval "window.playgroundState()"
+  node playground/cdp-client.mjs http://127.0.0.1:${relay.browserPort}
 
-Open and close Targets from the Client (Target.createTarget / closeTarget):
-
-  agent-browser --session cdp --cdp ${relay.browserPort} tab new ${APP_ORIGIN}/page-two
-  agent-browser --session cdp --cdp ${relay.browserPort} tab list
-  agent-browser --session cdp --cdp ${relay.browserPort} tab close t3
+Any compatible Client can use the same browser endpoint. Discover Targets with
+Target.getTargets, attach with Target.attachToTarget({ flatten: true }), and
+route Target commands with the returned sessionId.
 
 Things to try: forms, SPA tabs (pushstate/back/forward), async waits, console
 buttons (watch the shell's local console panel), hidden-element snapshots,

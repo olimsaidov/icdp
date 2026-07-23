@@ -1,5 +1,5 @@
 ---
-description: "Add icdp to an app built with Next.js, Vite, Remix, or any bundler — the client-only import pattern and the one bundler setting you might need."
+description: "Add icdp to an app built with Next.js, Vite, Remix, or any bundler — SSR-safe imports, browser-only startup, and the one bundler setting you might need."
 ---
 
 # Use icdp in a bundler app
@@ -8,19 +8,20 @@ You are adding icdp to an app built with a framework or bundler — Next.js, Vit
 Remix, SvelteKit, Astro — and you want it to work without fighting the build. Two
 things matter: **where** icdp runs, and **how** your bundler treats it.
 
-## icdp's browser entries are client-side
+## Start the browser entries client-side
 
-`@olimsaidov/icdp/frame` and `@olimsaidov/icdp/host` are browser code. They touch
-`window`, `postMessage`, and `MessagePort`, so they must run in the browser, never
-during server-side rendering. `@olimsaidov/icdp/relay/node` is the opposite — it is
-server-only (it uses `node:http` and `ws`) and belongs in a route handler or a
-standalone process, never in a client component.
+Importing `@olimsaidov/icdp/frame` or `@olimsaidov/icdp/host` is inert and safe
+during server-side rendering. Starting the Frame Agent and constructing the
+default Host use browser state, so those operations belong in client-side code.
+`@olimsaidov/icdp/relay/node` is the opposite — it is server-only (it uses
+`node:http` and `ws`) and belongs in a route handler or a standalone process,
+never in a client component.
 
-## Import the browser entries lazily
+## Start inside a browser-only effect
 
-In a server-rendered framework, a top-level `import` of `/frame` or `/host` would
-evaluate browser-only code on the server and crash the render. Load them inside a
-browser-only effect with a dynamic `import()`:
+The following pattern keeps both loading and startup inside the browser. The
+dynamic import is optional; a normal top-level value import is also SSR-safe as
+long as the constructor or startup function is called only in browser code.
 
 ```tsx
 "use client";
@@ -52,18 +53,18 @@ The embedded app boots the [Frame Agent](/explanation/concepts) the same way —
 deferred `import("@olimsaidov/icdp/frame")` inside an effect, then
 `startFrameAgent({ allowedParents })`. See [Embed the Frame Agent](/guides/embed-the-frame-agent).
 
-::: tip Why deferred, not just `"use client"`
-`"use client"` marks a component as client-rendered, but a framework may still
-*evaluate the module* on the server to produce the initial HTML. The dynamic
-`import()` inside an effect guarantees icdp only loads in the browser.
+::: tip Why an effect still matters
+The modules themselves do not touch browser globals at import time. The effect
+is what ensures `new IcdpHost()` or `startFrameAgent()` runs after browser state
+exists. A dynamic import can additionally keep icdp out of the server bundle,
+but it is not required for import safety.
 :::
 
 ## Bundler configuration
 
 icdp's `frame` and `host` entries are published as **self-contained ESM** — their
-runtime dependencies (including [`chobitsu`](https://github.com/liriliri/chobitsu),
-which is CommonJS) are inlined — so a modern bundler consumes them directly with no
-extra setup.
+browser runtime dependencies used by the Frame Agent are inlined, so a modern
+bundler consumes it directly with no extra setup.
 
 If your bundler externalizes `node_modules` and you hit an ESM/CommonJS interop
 error during build, opt the package into your bundler's own compilation:

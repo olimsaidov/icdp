@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 /**
  * Conformance golden generator (run manually: `npm run gen:conformance`).
  *
@@ -25,10 +26,9 @@ import path from "node:path";
 
 import { CASES } from "../tests/ax/_conformance.ts";
 
-const GOLDEN_DIR = path.join(
-  os.homedir(),
-  ".btca/agent/sandbox/chromium-src/third_party/blink/web_tests/http/tests/inspector-protocol/accessibility",
-);
+const CHROMIUM_REVISION = "3093417a828d9cea09f10201d61a72ccd25cf498";
+const CHROMIUM_ROOT = path.join(os.homedir(), ".btca/agent/sandbox/chromium-src");
+const GOLDEN_DIR = "third_party/blink/web_tests/http/tests/inspector-protocol/accessibility";
 const OUT = path.join(import.meta.dirname, "..", "tests", "ax", "conformance.expected.ts");
 
 /** Escape a golden so it survives embedding inside a `template literal`. */
@@ -37,8 +37,8 @@ function escapeTemplate(text: string): string {
 }
 
 function main(): void {
-  if (!fs.existsSync(GOLDEN_DIR)) {
-    console.error(`Chromium golden directory not found:\n  ${GOLDEN_DIR}`);
+  if (!fs.existsSync(path.join(CHROMIUM_ROOT, ".git"))) {
+    console.error(`Chromium checkout not found:\n  ${CHROMIUM_ROOT}`);
     console.error(
       "This generator needs the local Chromium checkout (see the memory note 'chromium-source-checkout').",
     );
@@ -48,12 +48,19 @@ function main(): void {
   const asserted = CASES.filter((c) => !c.ceiling);
   const missing: string[] = [];
   const entries = asserted.map((c) => {
-    const golden = path.join(GOLDEN_DIR, `${c.name}-expected.txt`);
-    if (!fs.existsSync(golden)) {
+    const golden = `${GOLDEN_DIR}/${c.name}-expected.txt`;
+    let text: string;
+    try {
+      text = execFileSync("git", ["show", `${CHROMIUM_REVISION}:${golden}`], {
+        cwd: CHROMIUM_ROOT,
+        encoding: "utf8",
+        maxBuffer: 10 * 1024 * 1024,
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+    } catch {
       missing.push(c.name);
       return "";
     }
-    const text = fs.readFileSync(golden, "utf8");
     return `  ${JSON.stringify(c.name)}: \`${escapeTemplate(text)}\`,`;
   });
 
@@ -67,6 +74,7 @@ function main(): void {
 // Vendored expected output of Chromium's inspector-protocol accessibility
 // goldens (web_tests/http/tests/inspector-protocol/accessibility/<name>-expected.txt),
 // embedded so the conformance suite runs with no Chromium dependency (CI-safe).
+// Chromium revision: ${CHROMIUM_REVISION}
 // Regenerate after a Chromium sync or when adding a case: npm run gen:conformance
 `;
   // Write to a temp path then rename, so a crash mid-write never truncates the

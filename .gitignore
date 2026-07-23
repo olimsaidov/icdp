@@ -4,3 +4,4 @@ dist/
 docs/.vitepress/dist/
 docs/.vitepress/cache/
 docs/public/demo/frame-agent.js
+docs/public/THIRD_PARTY_LICENSES.md

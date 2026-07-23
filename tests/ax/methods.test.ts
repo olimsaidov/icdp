@@ -166,6 +166,19 @@ describe("read-method surface", () => {
     expect(shallow.some((node) => node.role?.value === "button")).toBe(false);
   });
 
+  test("only depth -1 is unbounded, matching Chromium's tree walk", () => {
+    const { options } = buildContext(
+      `<main><section><article><button>deep</button></article></section></main>`,
+    );
+    const unbounded = getFullAXTree(options, -1).nodes;
+    const negativeTwo = getFullAXTree(options, -2).nodes;
+    const rootOnly = getFullAXTree(options, 0).nodes;
+
+    expect(unbounded.some((node) => node.role?.value === "button")).toBe(true);
+    expect(negativeTwo).toEqual(rootOnly);
+    expect(negativeTwo.length).toBeLessThan(unbounded.length);
+  });
+
   // --- the node-addressed read methods ---
 
   test("getRootAXNode returns the RootWebArea", () => {
@@ -202,11 +215,6 @@ describe("read-method surface", () => {
     expect(roles).toContain("RootWebArea"); // an ancestor
     // a far cousin's leaf text is NOT pulled in:
     expect(partial.some((node) => node.name?.value === "FarLink")).toBe(false);
-  });
-
-  test("getPartialAXTree() with no target returns the full tree (back-compat)", () => {
-    const { options } = buildContext(`<main><button>Go</button></main>`);
-    expect(getPartialAXTree(options).nodes.length).toBe(getFullAXTree(options).nodes.length);
   });
 
   test("queryAXTree finds nodes by role and by accessible name", () => {

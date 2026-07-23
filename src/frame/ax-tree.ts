@@ -567,9 +567,6 @@ function nativeRole(el: Element): RoleInfo {
 }
 
 function roleInfoOf(el: Element): RoleInfo {
-  const override = (el as { __agentAX?: { role?: unknown } }).__agentAX?.role;
-  if (typeof override === "string" && override)
-    return { wire: override, mojom: ARIA_TO_MOJOM[override] ?? "Unknown" };
   const explicit = explicitRole(el);
   if (explicit && explicit !== "none" && explicit !== "presentation") {
     const wire = explicit === "img" ? "image" : explicit;
@@ -710,42 +707,15 @@ function relatedReason(name: AXPropertyName, related: Element, registry: DomRegi
   return { name, value: { type: "idref", relatedNodes: [node] } };
 }
 
-// Dialogs opened via showModal(): jsdom's selector engine cannot answer
-// :modal, so track the calls directly (harmless in real browsers, where the
-// :modal check below already works).
-const modalDialogs = new WeakSet<Element>();
-(() => {
-  const proto = (
-    globalThis as unknown as { HTMLDialogElement?: { prototype: Record<string, unknown> } }
-  ).HTMLDialogElement?.prototype;
-  if (!proto) return;
-  const showModal = proto.showModal as ((...args: unknown[]) => unknown) | undefined;
-  if (showModal && (showModal as { __axPatched?: boolean }).__axPatched) return;
-  proto.showModal = function (this: Element, ...args: unknown[]) {
-    modalDialogs.add(this);
-    if (showModal) return showModal.apply(this, args);
-    this.setAttribute("open", ""); // jsdom lacks showModal entirely
-    return undefined;
-  };
-  (proto.showModal as { __axPatched?: boolean }).__axPatched = true;
-  const close = proto.close as ((...args: unknown[]) => unknown) | undefined;
-  proto.close = function (this: Element, ...args: unknown[]) {
-    modalDialogs.delete(this);
-    if (close) return close.apply(this, args);
-    this.removeAttribute("open");
-    return undefined;
-  };
-})();
-
 /** The open modal dialog blocking the rest of the document, if any. */
 function openModalDialog(doc: Document): Element | null {
   for (const dialog of Array.from(doc.querySelectorAll("dialog[open]"))) {
     try {
       if (dialog.matches(":modal")) return dialog;
     } catch {
-      // selector engine without :modal — fall through to the tracked set
+      // Environments without :modal support cannot distinguish showModal()
+      // from the non-modal open attribute.
     }
-    if (modalDialogs.has(dialog)) return dialog;
   }
   return null;
 }
@@ -1727,10 +1697,6 @@ function isTextEntryControl(el: Element): boolean {
 }
 
 function valueFor(el: Element, role: string): AXValue | undefined {
-  const override = (el as { __agentAX?: { value?: unknown } }).__agentAX?.value;
-  if (override !== undefined)
-    return ax(typeof override === "number" ? "number" : "string", override as never);
-
   if (
     RANGE_ROLES.has(role) ||
     el instanceof HTMLProgressElement ||
@@ -1900,18 +1866,6 @@ function isModalDialog(tree: AXTree, el: Element): boolean {
   return tree.modal === el;
 }
 
-/** Where the dialog focusing steps put focus after showModal(): the first
- *  focusable descendant, else the dialog itself. jsdom never runs these
- *  steps, so emulate them when focus is still on the body. */
-function modalFocusTarget(tree: AXTree): Element | null {
-  if (!tree.modal) return null;
-  const active = tree.options.document.activeElement;
-  if (active && active !== tree.options.document.body && active.localName !== "html") return null;
-  for (const el of Array.from(tree.modal.querySelectorAll("*")))
-    if (!isUnrendered(el) && isFocusable(el)) return el;
-  return tree.modal;
-}
-
 // propertiesFor follows Chromium's Fill* phase order:
 //   live-region -> global states -> widget properties -> widget states -> relations
 function propertiesFor(tree: AXTree, el: Element, role: string, name: NameInfo): AXProperty[] {
@@ -1932,7 +1886,7 @@ function propertiesFor(tree: AXTree, el: Element, role: string, name: NameInfo):
   addProp(props, "disabled", "boolean", isDisabled(el));
   addProp(props, "invalid", "token", invalidToken(el));
   addProp(props, "focusable", "booleanOrUndefined", isFocusable(el));
-  const focused = el === el.ownerDocument.activeElement || el === modalFocusTarget(tree);
+  const focused = el === el.ownerDocument.activeElement;
   addProp(props, "focused", "booleanOrUndefined", focused);
   addProp(props, "editable", "token", editableToken(el));
   if (isSettable(el)) addProp(props, "settable", "booleanOrUndefined", true);
@@ -2245,7 +2199,7 @@ export function getFullAXTree(
   depth?: number,
 ): Protocol.Accessibility.GetFullAXTreeResponse {
   const tree = buildTree(options);
-  const maxDepth = depth == null || depth < 0 ? -1 : depth;
+  const maxDepth = depth == null || depth === -1 ? -1 : depth;
   const nodes: AXNode[] = [wireNode(tree, tree.root)];
   const queue: Array<{ obj: AXObj; depth: number }> = [{ obj: tree.root, depth: 1 }];
   while (queue.length) {
@@ -2266,15 +2220,13 @@ export function getFullAXTree(
 
 /**
  * Fetch the AX node for a DOM node, optionally with its children and ancestor
- * chain (Chromium's getPartialAXTree). With no target, returns the whole tree
- * (back-compat with earlier clients).
+ * chain (Chromium's getPartialAXTree).
  */
 export function getPartialAXTree(
   options: AXTreeOptions,
-  target?: Protocol.DOM.BackendNodeId,
+  target: Protocol.DOM.BackendNodeId,
   fetchRelatives = true,
 ): Protocol.Accessibility.GetPartialAXTreeResponse {
-  if (target == null) return getFullAXTree(options);
   const tree = buildTree(options);
   const domNode = options.registry.nodeForBackendId(target);
   if (!domNode) return { nodes: [] };

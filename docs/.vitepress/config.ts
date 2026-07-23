@@ -62,14 +62,13 @@ export default withMermaid(
     vite: {
       resolve: {
         alias: {
-          // The live demo drives the repo's own icdp build — dogfood the source.
+          // The live demo drives the repo's own icdp build.
           "@olimsaidov/icdp/host": fileURLToPath(
             new URL("../../src/host/index.ts", import.meta.url),
           ),
         },
       },
-      // agent-browser-wasm resolves its .wasm via new URL(..., import.meta.url);
-      // keep it out of esbuild prebundling so that URL survives to the browser.
+      // Preserve the package's runtime .wasm URL for the browser.
       optimizeDeps: { exclude: ["@olimsaidov/agent-browser-wasm"] },
     },
 
@@ -106,8 +105,8 @@ export default withMermaid(
               { text: "Tap a Target with no server", link: "/guides/local-console-panel" },
               { text: "Run a Relay", link: "/guides/run-a-relay" },
               {
-                text: "Drive a Target with agent-browser",
-                link: "/guides/drive-with-agent-browser",
+                text: "Connect a CDP Client",
+                link: "/guides/connect-a-cdp-client",
               },
               { text: "Let Clients open & close Targets", link: "/guides/client-driven-targets" },
               {

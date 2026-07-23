@@ -1,16 +1,14 @@
 ---
-description: "API reference for serveRelay (the Node adapter) and RelayCore (the runtime-agnostic core)."
+description: "Reference for the raw-CDP RelayCore transport and its Node adapter."
 ---
 
-# `@olimsaidov/icdp/relay` and `/relay/node`
+# `@olimsaidov/icdp/relay`
 
-The [Relay](/explanation/concepts) is the server that exposes a Chrome-compatible CDP endpoint to external [Clients](/explanation/concepts). It serves exactly one [Host](/explanation/concepts) at a time and forwards [Session](/explanation/concepts)-scoped commands to it.
+The Relay exposes one browser CDP WebSocket, direct Target WebSockets, one Host
+uplink, and Chromium-style HTTP discovery routes. It is intentionally
+protocol-blind: the Host owns CDP Targets and Sessions.
 
-Two entry points ship: `@olimsaidov/icdp/relay/node` is a ready-made Node `http` + `ws` server, and `@olimsaidov/icdp/relay` is the runtime-agnostic `RelayCore` it is built on. Use the Node adapter unless you are embedding the Relay in another runtime.
-
-For the HTTP discovery routes and WebSocket upgrade paths this page references, see [/reference/http-endpoints](/reference/http-endpoints). For the on-the-wire bridge and CDP message shapes, see [/reference/protocol](/reference/protocol).
-
-## Part 1 — `@olimsaidov/icdp/relay/node`
+## Node adapter
 
 ```ts
 import { serveRelay } from "@olimsaidov/icdp/relay/node";
@@ -18,110 +16,82 @@ import { serveRelay } from "@olimsaidov/icdp/relay/node";
 const relay = await serveRelay({ hostPort: 3000, browserPort: 9229 });
 ```
 
-### `serveRelay(options?): Promise<RelayServer>`
+`serveRelay(options?)` requires Node 22 or newer and returns a
+`Promise<RelayServer>`.
 
-Starts two `http` servers: one Host uplink server and one browser/CDP server. The Host server accepts the Host bridge WebSocket and optional fallback HTTP requests. The browser server answers CDP discovery routes and accepts Client WebSocket connections. Built on `node:http` and `ws`. Requires Node >= 22. The returned promise resolves once both servers are listening.
+### `ServeRelayOptions`
 
-#### `ServeRelayOptions`
-
-| Option | Type | Default | Description |
-| --- | --- | --- | --- |
-| `hostPort` | `number` | `0` | Host uplink TCP port. `0` lets the OS assign a free port; read it back from `RelayServer.hostPort`. |
-| `hostHostname` | `string` | `"127.0.0.1"` | Interface for the Host uplink server to bind. |
-| `browserPort` | `number` | `0` | Browser/CDP TCP port. `0` lets the OS assign a free port; read it back from `RelayServer.browserPort`. |
-| `browserHostname` | `string` | `"127.0.0.1"` | Interface for the browser/CDP server to bind. |
-| `product` | `string` | `"icdp/0.1"` | Product string reported by `Browser.getVersion` and `/json/version`. Passed through to `RelayCore`. |
-| `hostPath` | `string` | `"/icdp/host"` | Path the Host bridge connects to over WebSocket. |
-| `browserPath` | `string` | `"/devtools/browser"` | Path Clients connect to over WebSocket, and the path advertised by `/json/version`. |
-| `hostWsUrl` | `string` | built from `hostHostname`, `hostPort`, `hostPath` | Public Host uplink URL returned as `RelayServer.hostWsUrl`. Use this when an ingress/proxy URL differs from the bind address. |
-| `browserWsUrl` | `string` | built from `browserHostname`, `browserPort`, `browserPath` | Public browser/CDP URL returned as `RelayServer.browserWsUrl` and advertised in `/json`. |
-| `fallback` | `(request: IncomingMessage, response: ServerResponse) => void` | — | Handles ordinary HTTP requests on the Host server. With no `fallback` set, Host-server HTTP requests get `404`. |
-
-#### `RelayServer`
-
-The resolved object.
-
-| Member | Type | Description |
+| Option | Default | Meaning |
 | --- | --- | --- |
-| `core` | `RelayCore` | The underlying core instance the adapter drives. |
-| `hostServer` | `Server` | The Host uplink HTTP server. |
-| `browserServer` | `Server` | The browser/CDP HTTP server. |
-| `hostPort` | `number` | The bound Host uplink TCP port. |
-| `browserPort` | `number` | The bound browser/CDP TCP port. |
-| `hostWsUrl` | `string` | The Host uplink URL. The Host connects here. |
-| `browserWsUrl` | `string` | The browser/CDP URL. Clients connect here. |
-| `stop` | `() => Promise<void>` | Terminates all open sockets and closes both HTTP servers. Resolves once both servers have closed. |
+| `hostPort` | `0` | Host-uplink TCP port; `0` selects a free port. |
+| `hostHostname` | `"127.0.0.1"` | Host-uplink bind address. |
+| `browserPort` | `0` | Client/discovery TCP port; `0` selects a free port. |
+| `browserHostname` | `"127.0.0.1"` | Client/discovery bind address. |
+| `product` | `"icdp/0.5.0"` | Product shown in HTTP discovery. |
+| `hostPath` | `"/icdp/host"` | Host WebSocket path. |
+| `browserPath` | `"/devtools/browser"` | Client WebSocket path. |
+| `targetPathPrefix` | `"/devtools/page/"` | Direct Target WebSocket prefix. |
+| `hostWsUrl` | derived | Public Host-uplink URL returned to the caller. |
+| `browserWsUrl` | derived | Public Client URL advertised by discovery. |
+| `fallback` | none | Handler for ordinary HTTP requests on the Host server. |
 
-Clients connect to `browserWsUrl`; the Host's `connectRelay` uplink connects to `hostWsUrl`. The browser/CDP server owns `/json/version`, `/json`, `/json/list`, `/icdp/status`, and the Client WebSocket. The Host server owns the Host WebSocket and optional `fallback`.
+### `RelayServer`
 
-::: info Debug logging
-With `ICDP_DEBUG=1` in the environment, the adapter logs every HTTP request, every WebSocket upgrade (with its resolved kind: `client`, `host`, or `reject`), and the first 400 characters of every WebSocket frame it receives from a Client or the Host.
-:::
+The result contains `core`, `hostServer`, `browserServer`, the two bound ports,
+the Host and browser WebSocket URLs, `targetWsUrl(targetId)`, and
+`stop(): Promise<void>`. `stop()` terminates open WebSockets and closes both
+HTTP servers.
 
-The HTTP routes (`/json/version`, `/json`, `/json/list`, `/icdp/status`) and the WebSocket upgrade behavior are documented in [/reference/http-endpoints](/reference/http-endpoints). For a runnable setup, see [/guides/run-a-relay](/guides/run-a-relay).
+Set `ICDP_DEBUG=1` to log HTTP requests, upgrades, and the first 400 characters
+of each WebSocket frame.
 
-## Part 2 — `@olimsaidov/icdp/relay`
+## `RelayCore`
 
 ```ts
 import { RelayCore } from "@olimsaidov/icdp/relay";
 
-const core = new RelayCore({ browserWsUrl: "ws://127.0.0.1:9229/devtools/browser" });
+const core = new RelayCore({
+  product: "my-shell/1.0",
+  browserWsUrl: "ws://127.0.0.1:9229/devtools/browser",
+  targetWsUrl: (targetId) =>
+    `ws://127.0.0.1:9229/devtools/page/${encodeURIComponent(targetId)}`,
+});
 ```
 
-### `class RelayCore`
+`RelayCoreOptions` contains `product`, `browserWsUrl`, and the optional
+`targetWsUrl(targetId)` formatter.
 
-The transport-free Relay. It holds all Relay state — the connected Host, Clients, Sessions, Targets, and pending commands — and produces JSON frames, but it never touches a socket directly. A runtime adapter feeds it raw connection events and frames and supplies a `SocketLike` for each connection. The Node adapter above is one such adapter; write another to run the Relay where `node:http`/`ws` are unavailable. See [/guides/embed-a-relay-in-another-runtime](/guides/embed-a-relay-in-another-runtime).
+An adapter supplies stable `SocketLike` objects:
 
-#### `RelayCoreOptions`
+```ts
+type SocketLike = {
+  send(data: string): void;
+  close(code?: number, reason?: string): void;
+};
+```
 
-| Option | Type | Default | Description |
-| --- | --- | --- | --- |
-| `product` | `string` | `"icdp/0.1"` | Reported by `Browser.getVersion` and `/json/version`. |
-| `browserWsUrl` | `string` | `""` | Absolute WebSocket URL of the browser endpoint, emitted in the `/json` payloads as `webSocketDebuggerUrl`. |
-| `browserRequestTimeoutMs` | `number` | `30000` | How long to wait for the Host to answer a forwarded browser-level request before failing the Client with `code -32000`. Backstops a silent or hung Host. |
+### Adapter methods
 
-#### `SocketLike`
-
-The minimal per-connection surface an adapter must supply for every Host and Client socket.
-
-| Member | Type | Description |
-| --- | --- | --- |
-| `send` | `(data: string) => void` | Send a JSON frame to the connection. |
-| `close` | `(code?: number, reason?: string) => void` | Close the connection. The core calls this with `1008` when it drops a superseded Host. |
-
-The core keeps `SocketLike` identity to track each connection, so an adapter must pass the *same* `SocketLike` instance for a given socket across all calls.
-
-### Adapter API
-
-The methods a runtime adapter calls to drive the core. Each is keyed by the `SocketLike` passed in.
-
-| Method | Description |
+| Method | Behavior |
 | --- | --- |
-| `hostConnected(socket)` | Registers the Host uplink. New-wins: any previous Host is dropped, its Targets removed, and its old socket closed with code `1008`. |
-| `hostDisconnected(socket)` | Clears the Host (only if `socket` is the current Host), clears its advertised handles, fails any forwarded browser-level requests, and drops all Targets. |
-| `hostMessage(socket, raw)` | Feeds one `HostToRelayMessage` JSON frame from the Host. Ignored unless `socket` is the current Host. |
-| `clientConnected(socket)` | Registers a new Client connection. |
-| `clientDisconnected(socket)` | Removes the Client, ends its Sessions, and drops any of its in-flight browser-level requests. |
-| `clientMessage(socket, raw)` | Feeds one CDP JSON frame from a Client. Routes by `sessionId`, answers registry/housekeeping locally, or forwards to the Host. |
+| `hostConnected(socket)` | Registers the socket as the Host, or as a pending contender while a validated Host is healthy. |
+| `hostDisconnected(socket)` | Removes the matching Host and clears cached Target summaries. |
+| `hostMessage(socket, raw)` | Validates `ready`, promotes a contender, then applies Target-summary changes or routes one raw `clientMessage` to its Client. |
+| `clientConnected(socket, targetId?)` | Assigns a Client id and syncs the complete Client list to the Host. A Target id creates a direct page connection and is rejected when unknown. |
+| `clientDisconnected(socket)` | Removes the Client and syncs the complete Client list. |
+| `clientMessage(socket, raw)` | Wraps raw CDP for the Host. With no Host, returns `-32000` to the Client when the request can be decoded. |
 
-### HTTP payload builders
+### Discovery builders
 
-The core also produces the JSON bodies for the discovery routes. An adapter serves these over its own HTTP layer (the Node adapter wires them to `/json/version`, `/json` and `/json/list`, and `/icdp/status` respectively).
+| Method | Result |
+| --- | --- |
+| `jsonVersion()` | `/json/version` payload and the browser WebSocket URL. |
+| `jsonList()` | One discovery entry per cached Host Target, with its direct WebSocket when `targetWsUrl` is configured. |
+| `status()` | `{ hostConnected, targets, clients }`. |
 
-| Method | Returns | Description |
-| --- | --- | --- |
-| `jsonVersion()` | `Record<string, unknown>` | The `/json/version` body, including `webSocketDebuggerUrl` (the `browserWsUrl`) and the `product` string. |
-| `jsonList()` | `Array<Record<string, unknown>>` | The `/json` and `/json/list` body: one entry per Target, each with `webSocketDebuggerUrl` set to the single browser endpoint. |
-| `status()` | `{ hostConnected: boolean; targets: TargetSummary[]; clients: number }` | The `/icdp/status` body: a snapshot of Relay state. |
+The Relay caches metadata only. `Browser.getVersion`, `Target.getTargets`,
+attachments, Session validation, command errors, and event routing are all
+implemented by the Host.
 
-### Semantics
-
-The core enforces these rules regardless of adapter:
-
-- **One Host, new-wins.** A second `hostConnected` drops the previous Host (closed with code `1008`) along with its Targets. A `ready` bridge message also re-announces and replaces the Target set.
-- **Flat-session protocol only.** There are no per-target WebSocket URLs. Clients discover and attach via `Target.getTargets` / `Target.attachToTarget` / `Target.setAutoAttach` / `Target.setDiscoverTargets` on the single browser endpoint, then route commands by `sessionId`. See [/explanation/flat-session-protocol](/explanation/flat-session-protocol).
-- **The Relay answers registry and housekeeping methods itself.** `Browser.getVersion`, `Schema.getDomains`, `Target.getTargets`, `Target.getTargetInfo`, `Target.attachToTarget`, `Target.detachFromTarget`, `Target.setAutoAttach`, `Target.setDiscoverTargets`, `Target.activateTarget`, `Target.setRemoteLocations`, `Browser.close`, `Browser.setDownloadBehavior`, `Browser.setWindowBounds`, and `Security.setIgnoreCertificateErrors` are handled from the core's own session/target state. They are never forwarded to the Host or the Frame Agent.
-- **Only two browser-level methods are forwardable.** By default `Target.createTarget` is rejected (`icdp targets are iframes paired by the Host`) and `Target.closeTarget` returns `{ success: true }` as a no-op. If — and only if — the Host advertised the method in its ready `handles`, the Relay forwards that method to the Host as a `browserRequest` and awaits the result, bounded by `browserRequestTimeoutMs`. `Target.createTarget` and `Target.closeTarget` are the only methods a Host may take ownership of; registry methods stay Relay-owned because they read the Relay's own state.
-- **Frame events fan out per Target.** A `BridgeEvent` from one Target is delivered to every Session attached to that Target.
-
-For why the Host owns the iframes and the Relay owns the registry, see [/explanation/architecture](/explanation/architecture). For the bridge message shapes named above, see [/reference/protocol](/reference/protocol).
+See [HTTP endpoints](/reference/http-endpoints) for concrete payloads and
+[the flat-session protocol](/explanation/flat-session-protocol) for routing.

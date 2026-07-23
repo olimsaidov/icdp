@@ -114,7 +114,30 @@ function makeTransport() {
         await ensureSession();
         return { sessionId };
       }
-      if (method.startsWith("Target.")) return {};
+      if (method === "Target.setDiscoverTargets" || method === "Target.setAutoAttach") {
+        return {};
+      }
+      if (method === "Target.getTargetInfo") {
+        const t = r.host?.targets().find((x) => x.targetId === TARGET_ID);
+        if (!t) throw Object.assign(new Error("No target with given id found"), { code: -32602 });
+        return {
+          targetInfo: {
+            targetId: t.targetId,
+            type: "page",
+            title: t.title,
+            url: t.url,
+            attached: Boolean(r.session),
+          },
+        };
+      }
+      if (method === "Target.detachFromTarget") {
+        r.session?.detach();
+        r.session = null;
+        return {};
+      }
+      if (method.startsWith("Target.")) {
+        throw Object.assign(new Error(`'${method}' wasn't found`), { code: -32601 });
+      }
       if (method === "Browser.getVersion") {
         return {
           protocolVersion: "1.3",

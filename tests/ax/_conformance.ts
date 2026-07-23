@@ -50,6 +50,34 @@ function setup(html: string): Options {
   return { document, frameId: "icdp-frame", registry: createDomRegistry() };
 }
 
+function showModalInHarness(dialog: HTMLDialogElement): void {
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
+
+  let matchesModal = false;
+  try {
+    matchesModal = dialog.matches(":modal");
+  } catch {}
+  if (!matchesModal) {
+    const matches = dialog.matches;
+    dialog.matches = function (selector: string): boolean {
+      return selector === ":modal" || matches.call(this, selector);
+    };
+  }
+
+  if (dialog.ownerDocument.activeElement === dialog.ownerDocument.body) {
+    const target =
+      (dialog.querySelector(
+        'button, input, select, textarea, a[href], dialog[open], [tabindex]:not([tabindex="-1"])',
+      ) as HTMLElement | null) ?? dialog;
+    const tabindex = target.getAttribute("tabindex");
+    target.setAttribute("tabindex", "-1");
+    target.focus();
+    if (tabindex === null) target.removeAttribute("tabindex");
+    else target.setAttribute("tabindex", tabindex);
+  }
+}
+
 function roundtrip<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
@@ -674,8 +702,7 @@ export const CASES: ConformanceCase[] = [
         false,
         (doc) => {
           const dialog = doc.querySelector("dialog") as HTMLDialogElement;
-          if (typeof dialog.showModal === "function") dialog.showModal();
-          else dialog.setAttribute("open", "");
+          showModalInHarness(dialog);
         },
       ),
   },
@@ -700,8 +727,7 @@ export const CASES: ConformanceCase[] = [
         false,
         (doc) => {
           const dialog = doc.getElementById("modal") as HTMLDialogElement;
-          if (typeof dialog.showModal === "function") dialog.showModal();
-          else dialog.setAttribute("open", "");
+          showModalInHarness(dialog);
         },
       ),
   },

@@ -7,7 +7,7 @@
 //
 // Runs as part of `docs:build` / `docs:dev`. Standalone: `node docs/scripts/build-demo-frame.mjs`.
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -16,6 +16,10 @@ import { rolldown } from "rolldown";
 const here = dirname(fileURLToPath(import.meta.url));
 const outDir = join(here, "..", "public", "demo");
 mkdirSync(outDir, { recursive: true });
+copyFileSync(
+  join(here, "..", "..", "THIRD_PARTY_LICENSES.md"),
+  join(outDir, "..", "THIRD_PARTY_LICENSES.md"),
+);
 
 const build = await rolldown({
   input: join(here, "frame-agent-entry.ts"),

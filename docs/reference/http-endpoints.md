@@ -4,7 +4,13 @@ description: "The HTTP discovery routes and WebSocket upgrade paths the Relay se
 
 # Relay HTTP endpoints
 
-The [Relay](/explanation/concepts) exposes a Chrome-compatible HTTP discovery surface alongside its WebSocket endpoints. The Node adapter (`serveRelay`, in [src/relay/node.ts](https://github.com/olimsaidov/icdp/blob/master/src/relay/node.ts)) runs two HTTP servers: a browser/CDP server for Client discovery and CDP WebSocket traffic, and a Host server for the Host uplink WebSocket plus optional fallback HTTP. The JSON payloads themselves come from `RelayCore` (`jsonVersion()`, `jsonList()`, `status()`), so any runtime adapter built on [RelayCore](/reference/relay) serves the same shapes.
+The [Relay](/explanation/concepts) exposes Chromium-shaped HTTP discovery
+alongside its WebSocket endpoints. The Node adapter (`serveRelay`, in
+[src/relay/node.ts](https://github.com/olimsaidov/icdp/blob/master/src/relay/node.ts))
+runs two HTTP servers: a browser/CDP server for Client discovery and raw CDP
+traffic, and a Host server for the Host uplink plus optional fallback HTTP.
+The JSON payloads come from `RelayCore` (`jsonVersion()`, `jsonList()`,
+`status()`), so another runtime adapter can serve the same shapes.
 
 The four discovery routes below live on the browser/CDP server. They respond with `Content-Type: application/json; charset=utf-8` and HTTP status `200`; any other browser/CDP HTTP path returns `404`. The Host server does not serve these routes. Set `ICDP_DEBUG=1` to log every HTTP request and WebSocket upgrade.
 
@@ -25,9 +31,9 @@ The browser version descriptor a [Client](/explanation/concepts) reads to discov
 
 ```json
 {
-  "Browser": "icdp/0.1",
+  "Browser": "icdp/0.5.0",
   "Protocol-Version": "1.3",
-  "User-Agent": "icdp/0.1",
+  "User-Agent": "icdp/0.5.0",
   "V8-Version": "synthetic",
   "WebKit-Version": "synthetic",
   "webSocketDebuggerUrl": "ws://127.0.0.1:9229/devtools/browser"
@@ -36,7 +42,7 @@ The browser version descriptor a [Client](/explanation/concepts) reads to discov
 
 | Field | Type | Value |
 | --- | --- | --- |
-| `Browser` | string | The `product` string (default `icdp/0.1`). |
+| `Browser` | string | The `product` string (default `icdp/0.5.0`). |
 | `Protocol-Version` | string | `"1.3"`, fixed. |
 | `User-Agent` | string | The `product` string. |
 | `V8-Version` | string | `"synthetic"`, fixed. |
@@ -56,7 +62,7 @@ Both paths return the same array, one entry per [Target](/explanation/concepts) 
     "title": "Playground",
     "type": "page",
     "url": "http://127.0.0.1:3001/playground",
-    "webSocketDebuggerUrl": "ws://127.0.0.1:9229/devtools/browser"
+    "webSocketDebuggerUrl": "ws://127.0.0.1:9229/devtools/page/playground"
   }
 ]
 ```
@@ -69,10 +75,13 @@ Both paths return the same array, one entry per [Target](/explanation/concepts) 
 | `title` | string | The Target's last-known title. |
 | `type` | string | `"page"`, fixed. |
 | `url` | string | The Target's last-known URL. |
-| `webSocketDebuggerUrl` | string | The single browser endpoint (`browserWsUrl`) — the same value on every entry. |
+| `webSocketDebuggerUrl` | string | Direct WebSocket for this Target. Omitted only when a custom `RelayCore` adapter does not configure `targetWsUrl`. |
 
-::: info Every entry points at one URL
-`webSocketDebuggerUrl` is the browser endpoint, not a per-target URL. icdp is flat-session only: there are no per-target WebSocket URLs. A Client connects once to the browser endpoint and attaches to a Target with `Target.attachToTarget`, then routes commands by `sessionId`. See [the flat-session protocol](/explanation/flat-session-protocol).
+::: info Two connection forms
+`/json/version` advertises the browser endpoint for explicit flat Sessions.
+Each list entry advertises a direct Target endpoint whose implicit commands and
+events omit `sessionId`. See
+[the flat-session protocol](/explanation/flat-session-protocol) for both forms.
 :::
 
 ### `GET /icdp/status`
@@ -97,14 +106,21 @@ A snapshot of Relay state, for health checks and the [playground](/) status page
 
 ## WebSocket upgrade paths
 
-The Relay accepts WebSocket upgrades on exactly two paths, but they are on different servers. Both default values are configurable through `ServeRelayOptions`.
+The Relay accepts browser and direct Target upgrades on the browser/CDP server,
+plus the Host uplink on the Host server. All defaults are configurable through
+`ServeRelayOptions`.
 
 | Server | Path option | Default | Role | Adapter call |
 | --- | --- | --- | --- | --- |
-| browser/CDP | `browserPath` | `/devtools/browser` | Client connection (standard CDP) | `clientConnected` / `clientMessage` / `clientDisconnected` |
+| browser/CDP | `browserPath` | `/devtools/browser` | Client connection (raw CDP JSON) | `clientConnected` / `clientMessage` / `clientDisconnected` |
+| browser/CDP | `targetPathPrefix` | `/devtools/page/<targetId>` | Direct Target connection (sessionless implicit Session) | `clientConnected(socket, targetId)` / `clientMessage` / `clientDisconnected` |
 | Host | `hostPath` | `/icdp/host` | Host uplink (bridge protocol) | `hostConnected` / `hostMessage` / `hostDisconnected` |
 
-An upgrade on any other path is rejected: the socket is destroyed without an HTTP response. Only one Host is served at a time; a new Host connection drops the previous one (new-wins). The browser path appears verbatim as the `webSocketDebuggerUrl` in `/json/version` and `/json`.
+An upgrade on any other path is rejected: the socket is destroyed without an
+HTTP response. Only one validated Host is served at a time. A new Host socket
+remains a contender until its `ready` frame passes bridge validation, then it
+replaces the previous Host. The browser path appears in `/json/version`;
+per-Target paths appear in `/json` and `/json/list`.
 
 The full URLs are read back from the `RelayServer` returned by `serveRelay`:
 
@@ -114,6 +130,7 @@ import { serveRelay } from "@olimsaidov/icdp/relay/node";
 const relay = await serveRelay({ hostPort: 3000, browserPort: 9229 });
 relay.hostWsUrl;    // ws://127.0.0.1:3000/icdp/host          (Host uplink)
 relay.browserWsUrl; // ws://127.0.0.1:9229/devtools/browser  (Clients)
+relay.targetWsUrl("preview"); // ws://127.0.0.1:9229/devtools/page/preview
 ```
 
 See [the Relay reference](/reference/relay) for the `RelayCore` adapter API and the `ServeRelayOptions` fields that set ports, hostnames, paths, advertised URLs, `product`, and `fallback`.

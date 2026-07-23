@@ -35,9 +35,17 @@ type RunAgentOptions = {
 type AgentHarness = {
   /** Origin of the embedded app (the iframe), which is what CDP observes. */
   origin: string;
+  browserWsUrl: string;
   run: (args: string[], options?: RunAgentOptions) => Promise<AgentCommandResult>;
   reset: (path?: string) => Promise<void>;
   close: () => Promise<void>;
+};
+
+type RawCdpResponse = {
+  id?: number;
+  result?: any;
+  error?: { code: number; message: string };
+  sessionId?: string;
 };
 
 let frameScript = "";
@@ -79,6 +87,38 @@ function parseJsonLine(stdout: string): any | undefined {
     .find((item) => item.trim().startsWith("{"));
   if (!line) return undefined;
   return JSON.parse(line);
+}
+
+async function openCdpSocket(url: string): Promise<WebSocket> {
+  const socket = new WebSocket(url);
+  await new Promise<void>((resolve, reject) => {
+    socket.addEventListener("open", () => resolve(), { once: true });
+    socket.addEventListener("error", () => reject(new Error(`failed to open ${url}`)), {
+      once: true,
+    });
+  });
+  return socket;
+}
+
+function sendRawCdp(
+  socket: WebSocket,
+  id: number,
+  method: string,
+  params: Record<string, unknown> = {},
+  sessionId?: string,
+): Promise<RawCdpResponse> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timed out waiting for ${method}`)), 10_000);
+    const onMessage = (event: MessageEvent) => {
+      const message = JSON.parse(String(event.data)) as RawCdpResponse;
+      if (message.id !== id) return;
+      clearTimeout(timer);
+      socket.removeEventListener("message", onMessage);
+      resolve(message);
+    };
+    socket.addEventListener("message", onMessage);
+    socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
+  });
 }
 
 async function runAgent(
@@ -456,6 +496,7 @@ async function createHarness(): Promise<AgentHarness> {
 
   return {
     origin: appOrigin,
+    browserWsUrl: relay.browserWsUrl,
     run,
     reset: async (path = "/") => {
       const destination = `${appOrigin}${path}`;
@@ -527,6 +568,37 @@ describe("agent-browser against icdp (cross-origin iframe through relay + host)"
       expect(state.search).toBe("alpha");
       expect(state.followUp).toBe(true);
       expect(state.careTeam).toBe("social");
+
+      // Prove the same live target works for a plain CDP WebSocket client, not
+      // only through agent-browser's command layer.
+      const socket = await openCdpSocket(harness.browserWsUrl);
+      try {
+        const targets = await sendRawCdp(socket, 1, "Target.getTargets");
+        const targetId = targets.result?.targetInfos?.[0]?.targetId as string;
+        const attached = await sendRawCdp(socket, 2, "Target.attachToTarget", {
+          targetId,
+          flatten: true,
+        });
+        const sessionId = attached.result?.sessionId as string;
+        const storage = await sendRawCdp(
+          socket,
+          3,
+          "Storage.getUsageAndQuota",
+          { origin: harness.origin },
+          sessionId,
+        );
+        expect(storage.error).toBeUndefined();
+        expect(storage.result).toMatchObject({
+          overrideActive: false,
+          quota: expect.any(Number),
+          usage: expect.any(Number),
+          usageBreakdown: [],
+        });
+        expect(storage.result.quota).toBeGreaterThanOrEqual(0);
+        expect(storage.result.usage).toBeGreaterThanOrEqual(0);
+      } finally {
+        socket.close();
+      }
     } finally {
       await harness.close();
     }
@@ -718,20 +790,23 @@ describe("agent-browser against icdp (cross-origin iframe through relay + host)"
     try {
       const screenshot = await harness.run(["screenshot"], { allowFailure: true });
       expect(screenshot.exitCode).not.toBe(0);
-      expect(screenshot.stdout + screenshot.stderr).toContain("Method not found");
+      expect(screenshot.stdout + screenshot.stderr).toContain(
+        "'Page.captureScreenshot' wasn't found",
+      );
 
       const pdf = await harness.run(["pdf", "/tmp/icdp-e2e.pdf"], { allowFailure: true });
       expect(pdf.exitCode).not.toBe(0);
-      expect(pdf.stdout + pdf.stderr).toContain("Method not found");
+      expect(pdf.stdout + pdf.stderr).toContain("'Page.printToPDF' wasn't found");
 
       const frame = await harness.run(["frame", "#fixture-frame"], { allowFailure: true });
       expect(frame.exitCode).not.toBe(0);
       expect(frame.stdout + frame.stderr).toMatch(/frame|Method not found|not found/i);
 
-      // agent-browser 0.27 added pushstate (0.26 lacked it, per the prior art's
-      // matrix); it drives SPA history through eval, which the Frame Agent supports.
-      const pushstate = await harness.run(["pushstate", "/pushed"]);
-      expect(pushstate.json?.success).toBe(true);
+      const pushstate = await harness.run([
+        "eval",
+        "history.pushState({}, '', '/pushed'); location.href",
+      ]);
+      expect(pushstate.json?.data.result).toContain("/pushed");
       expect((await harness.run(["wait", "--url", "pushed"])).json?.success).toBe(true);
     } finally {
       await harness.close();

@@ -28,5 +28,6 @@ import { PROTOCOL_VERSION } from "@olimsaidov/icdp/protocol";
 
 Two pages describe behavior that spans the entry points:
 
-- [CDP support matrix](/reference/cdp-support) — the CDP domains and methods the [Frame Agent](/explanation/concepts) registers, the methods the [Relay](/explanation/concepts) answers itself, and what is intentionally unsupported.
+- [CDP support](/reference/cdp-support) — the exact Frame-Agent and Host
+  methods and what is intentionally unsupported.
 - [HTTP endpoints](/reference/http-endpoints) — the discovery and status routes the Node [Relay](/explanation/concepts) serves over HTTP, alongside its WebSocket upgrade paths.

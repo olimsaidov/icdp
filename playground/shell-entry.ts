@@ -18,8 +18,8 @@ let tabCounter = 0;
 
 // Annotated so the hooks below can reference `host` without circular inference.
 const host: IcdpHost = new IcdpHost({
-  // A Client opens a Target (e.g. `agent-browser --cdp <port> tab new <url>`):
-  // materialise an iframe and pair it, exactly like a boot target.
+  // Target.createTarget materialises an iframe and pairs it exactly like a
+  // Target present at boot.
   onCreateTarget: ({ url }) => {
     // Resolve relative/blank requests against the app origin. Only app-origin
     // pages carry a Frame Agent, so anything else won't connect — and the Host
@@ -36,9 +36,9 @@ const host: IcdpHost = new IcdpHost({
     // createTarget resolves, so its first command can't race the channel.
     return targetId;
   },
-  // A Client closes a Target (`tab close`): destroy the Pairing, like the panel's
-  // own Close button. Any target is closable — boot ones aren't special.
-  onCloseTarget: (targetId) => host.unpair(targetId),
+  // Authorize Target.closeTarget. The Host queues the success response, then
+  // destroys the Pairing; targetDestroyed below removes the panel.
+  onCloseTarget: () => {},
 });
 
 /** Build one panel around a fresh iframe and pair it as `targetId`. */

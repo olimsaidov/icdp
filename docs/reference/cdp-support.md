@@ -1,151 +1,212 @@
 ---
-description: "The exact CDP domains and methods the Frame Agent implements, and what is intentionally unsupported."
+description: "The exact Chromium-shaped CDP methods icdp implements and the browser features page JavaScript cannot provide."
 ---
 
-# CDP support matrix
+# CDP support
 
-The [Frame Agent](/explanation/concepts) emulates a subset of the Chrome DevTools Protocol against the real DOM. It registers exactly the domains and methods below; every other command returns a CDP error. The lists here are the `cdp.register(...)` calls in `src/frame/index.ts` — not the wider CDP surface a real browser exposes.
+icdp implements a deliberately small, current CDP surface. The Frame Agent
+implements exactly **37 methods**. Every name below exists in the installed
+Chromium DevTools protocol schema; tests lock the list to both the
+implementation and that schema.
 
-Browser- and Target-level registry methods (`Target.getTargets`, `Target.attachToTarget`, `Target.setAutoAttach`, `Browser.getVersion`, …) are answered by the [Relay](/explanation/concepts), not the Frame Agent. They read the Relay's own session and Target state and never reach the iframe. See the [Relay reference](/reference/relay) for that list and the [flat-session protocol](/explanation/flat-session-protocol) for how Clients address Targets.
+There are no inherited methods and no successful placeholders. A method not
+listed here returns `-32601`.
 
-## Implemented domains
+## Frame Agent methods
 
 ### Accessibility
 
-| Method | Behavior |
-| --- | --- |
-| `disable` | No-op. |
-| `enable` | No-op. |
-| `getFullAXTree` | Full accessibility tree, honoring `depth`. |
-| `getPartialAXTree` | Subtree at a node; `fetchRelatives` defaults to `true`. |
-| `getRootAXNode` | The root AX node. |
-| `getChildAXNodes` | Child AX nodes of a given AX node `id`. |
-| `getAXNodeAndAncestors` | A node and its ancestor chain; requires a `nodeId` or `backendNodeId`. |
-| `queryAXTree` | AX nodes under a target, filtered by `accessibleName` and `role`. |
+```text
+Accessibility.disable
+Accessibility.enable
+Accessibility.getAXNodeAndAncestors
+Accessibility.getChildAXNodes
+Accessibility.getFullAXTree
+Accessibility.getPartialAXTree
+Accessibility.getRootAXNode
+Accessibility.queryAXTree
+```
 
-See [Accessibility tree](/explanation/accessibility-tree) for how the tree is computed and where it diverges from Chromium.
-
-### Animation
-
-| Method | Behavior |
-| --- | --- |
-| `enable` | No-op. |
-
-### Autofill
-
-| Method | Behavior |
-| --- | --- |
-| `setAddresses` | No-op. |
-
-### CSS
-
-| Method | Behavior |
-| --- | --- |
-| `disable` | No-op. |
-| `enable` | No-op. |
-| `getComputedStyleForNode` | Computed style for a node as `{ name, value }` pairs. |
+The accessibility tree is derived from the live DOM using ARIA and
+HTML-accessibility rules. As in Chromium, `getFullAXTree`,
+`getPartialAXTree`, and `queryAXTree` can run without enabling the domain;
+`getRootAXNode`, `getChildAXNodes`, and `getAXNodeAndAncestors` require
+`Accessibility.enable` in the same Session. AX ids use backend DOM ids and
+are document-scoped. The in-page backend does not synthesize Chromium's
+`loadComplete` or `nodesUpdated` accessibility events.
 
 ### DOM
 
-The DOM domain unifies `nodeId` with `backendNodeId`, so either resolves the same node.
+```text
+DOM.describeNode
+DOM.disable
+DOM.enable
+DOM.getBoxModel
+DOM.getDocument
+DOM.querySelectorAll
+DOM.requestNode
+DOM.resolveNode
+DOM.scrollIntoViewIfNeeded
+```
 
-| Method | Behavior |
-| --- | --- |
-| `describeNode` | Describe a node by `backendNodeId`/`nodeId` (defaults to node `1`). |
-| `discardSearchResults` | Drop a stored search by `searchId`. |
-| `enable` | No-op. |
-| `focus` | Focus an `HTMLElement` by node id. |
-| `getAttributes` | Flat `[name, value, …]` attribute list for an element. |
-| `getBoxModel` | Box model from `getBoundingClientRect` (content/padding/border/margin share the rect). |
-| `getContentQuads` | Single content quad derived from the box model. |
-| `getDocument` | Document root, honoring `depth` (defaults to `1`). |
-| `getOuterHTML` | `outerHTML` of an element or document. |
-| `getSearchResults` | Slice stored search node ids by `fromIndex`/`toIndex`. |
-| `performSearch` | Match by CSS selector, falling back to case-insensitive text search; returns a `searchId`. |
-| `pushNodesByBackendIdsToFrontend` | Echo the requested `backendNodeIds` as node ids. |
-| `querySelector` | First match under a root node (or document); `0` when none. |
-| `querySelectorAll` | All matches under a root node (or document). |
-| `requestChildNodes` | Emit `DOM.setChildNodes` for a node's children at `depth` (defaults to `1`). |
-| `resolveNode` | Wrap a node id as a `backend:<id>` remote object. |
-| `scrollIntoViewIfNeeded` | Scroll the element to block/inline center. |
+Frontend `nodeId` values are allocated independently per Session. Shared
+`backendNodeId` values identify nodes only within the current document.
+`DOM.getDocument` resets that Session's frontend ids and implicitly enables
+the domain. Its Chromium default depth is two; `DOM.describeNode` defaults to
+depth zero. Open shadow-root metadata is returned with ordinary nodes, and
+`pierce: true` traverses those roots. `DOM.resolveNode` and `DOM.requestNode`
+bridge DOM ids and that Session's Runtime object handles.
+
+While DOM is enabled, attribute, text, insertion, and removal events are
+emitted only for frontend nodes already bound in that Session. Removing a
+subtree invalidates its frontend ids.
+
+`DOM.getBoxModel` uses page layout geometry and computed margins, borders, and
+padding. It does not expose Chromium's layout tree or compositor internals.
 
 ### Input
 
-| Method | Behavior |
-| --- | --- |
-| `dispatchKeyEvent` | Dispatch `keydown`/`keyup`; `Backspace` deletes backward and `text` is inserted into the active element. |
-| `dispatchMouseEvent` | Resolve the target via `elementFromPoint`, then dispatch move/over/enter, down, up + synthetic `click`/`dblclick`, or wheel + scroll. |
-| `insertText` | Insert text into the active input, textarea, or contenteditable element. |
+```text
+Input.dispatchKeyEvent
+Input.dispatchMouseEvent
+Input.insertText
+```
 
-::: warning
-`dispatchMouseEvent` resolves the target with `document.elementFromPoint`. A below-the-fold element must be scrolled into view first, or the click silently misses. See [Drive with agent-browser](/guides/drive-with-agent-browser).
-:::
+These commands dispatch DOM keyboard, pointer, mouse, wheel, input, and click
+behavior inside the frame. Mouse dispatch carries supported pressure, pen,
+tilt, tangential-pressure, and twist fields into synthetic `PointerEvent`s.
+The resulting events are synthetic (`Event.isTrusted === false`). They cannot
+reproduce native composition, browser shortcuts, file pickers, drag-and-drop,
+or privileged default actions.
 
 ### Network
 
-| Method | Behavior |
-| --- | --- |
-| `emulateNetworkConditionsByRule` | Returns synthetic `ruleIds` for the matched conditions; applies no real throttling. |
-| `overrideNetworkState` | No-op. |
-| `setBlockedURLs` | No-op. |
+```text
+Network.disable
+Network.enable
+Network.getResponseBody
+```
+
+`Network.enable` observes page-created `fetch`, `XMLHttpRequest`, and
+`WebSocket` activity from that point forward. Events use current CDP payload
+shapes and are delivered only to Sessions with Network enabled. Fetch/XHR
+response bodies are retained for `getResponseBody` in a bounded cache
+(100 bodies and 10 MiB by default).
+
+Observation is implemented by wrapping page APIs. It cannot see the initial
+document, parser-created subresources, preloads, service workers, workers,
+cache internals, browser extensions, or requests created before enable. It
+does not intercept, block, modify, throttle, or faithfully expose the native
+network stack.
 
 ### Page
 
-| Method | Behavior |
-| --- | --- |
-| `addScriptToEvaluateOnNewDocument` | Returns a synthetic `identifier`; no script is installed. |
-| `getFrameTree` | Single-frame tree for the embedded document. |
-| `getResourceTree` | Frame tree with an empty `resources` list. |
-| `navigate` | **Same-origin only.** Navigating outside the embedded app's origin throws. |
+```text
+Page.disable
+Page.enable
+Page.getFrameTree
+Page.navigate
+Page.reload
+```
 
-::: info
-`navigate` sets `location.href` for a same-origin URL. A cross-origin URL throws — the embedded app's origin is the navigation boundary. Reloads and same-origin navigations keep the same `targetId`; see [Target lifecycle](/explanation/target-lifecycle).
-:::
+`Page.enable` starts lifecycle observation without replaying events that
+already happened. A Page domain restored into a replacement document reports
+that document's `Page.frameNavigated`, then reports the real
+`Page.domContentEventFired` and `Page.loadEventFired` stages. Stages that occur
+during the replacement handshake gap are journaled and delivered after the
+Session is restored; they are never fabricated from `Page.enable`. There is one
+frame id, `icdp-frame`. A same-document transport reconnect does not look like
+a navigation, while a persisted `pageshow` reports
+`BackForwardCacheRestore`, matching Chromium's navigation type.
+`Page.navigate` accepts only an absolute URL on the current origin, validates
+an optional frame id, and omits `loaderId` because page JavaScript cannot know
+the next browser loader. `Page.reload` validates an optional loader id before
+calling the page reload API.
 
 ### Runtime
 
-| Method | Behavior |
-| --- | --- |
-| `addBinding` | No-op. |
-| `callFunctionOn` | Indirect-eval a function declaration against a `backend:<id>` object or `window`; supports `awaitPromise`. |
-| `enable` | Emits `Runtime.executionContextCreated` (context id `1`, name `top`) and flushes queued events. |
-| `evaluate` | Indirect-eval an expression; supports `awaitPromise`. |
-| `runIfWaitingForDebugger` | No-op. |
+```text
+Runtime.callFunctionOn
+Runtime.disable
+Runtime.enable
+Runtime.evaluate
+Runtime.getProperties
+Runtime.releaseObject
+Runtime.releaseObjectGroup
+Runtime.runIfWaitingForDebugger
+```
 
-Runtime events (including `Runtime.consoleAPICalled` from the console bridge) are queued until `Runtime.enable`, capped at ~200, then flushed. The single execution context has id `1` and name `top`.
+The framed page has one default execution context. `Runtime.enable` emits
+`Runtime.executionContextCreated` and replays up to 200 captured console
+calls. Console events and Runtime object handles are isolated per Session.
+
+Evaluation supports CDP primitive/unserializable values, opaque object ids,
+object groups, `returnByValue`, `awaitPromise`, call arguments, property
+descriptors, `exceptionDetails`, and conservative `throwOnSideEffect`
+handling that never executes the expression. Unsupported preview,
+serialization, timeout, user-gesture, and REPL options fail explicitly. It
+runs ordinary JavaScript in the page realm; there are no isolated worlds,
+inspector pause state, breakpoints, debugger object previews, heap inspection,
+or V8 profiler integration.
+
+`Runtime.runIfWaitingForDebugger` returns success because an icdp document is
+never held on Chromium's debugger-on-start gate; it does not emulate a
+debugger.
 
 ### Storage
 
-| Method | Behavior |
-| --- | --- |
-| `getStorageKey` | Returns the document origin as the `storageKey`. |
+```text
+Storage.getUsageAndQuota
+```
 
-## No-op methods
+The requested origin is required and must equal the framed page's current
+origin. Values come from `navigator.storage.estimate()`. If the browser does
+not expose an estimate, the command fails instead of returning invented
+zeros.
 
-These are registered so domain enables and setup calls succeed, but they have no effect:
+## Host Browser/Target methods
 
-- `Animation.enable`
-- `Autofill.setAddresses`
-- `Network.overrideNetworkState`
-- `Network.setBlockedURLs`
-- `Runtime.addBinding`
-- `Runtime.runIfWaitingForDebugger`
+The Host, not the Relay or Frame Agent, implements this surface for the
+browser root, direct page sockets, and explicit flat Sessions:
 
-The `disable`/`enable` handlers on `Accessibility` and `CSS`, and `DOM.enable`, are also no-ops; the Frame Agent holds no per-domain state to toggle. (`DOM.disable` is not registered.)
+```text
+Browser.getVersion
+Target.attachToTarget
+Target.closeTarget
+Target.createTarget
+Target.detachFromTarget
+Target.getTargetInfo
+Target.getTargets
+Target.setAutoAttach
+Target.setDiscoverTargets
+Target.setRemoteLocations
+```
 
-## Unknown methods
+Only flat Sessions are supported. `Target.setRemoteLocations` is listed here
+because the Host recognizes it and returns `-32000`, `Not supported`.
+`Target.createTarget` and `Target.closeTarget` require the corresponding Host
+lifecycle hook. Other browser-level methods return `-32601`.
 
-A method the Frame Agent has not registered returns a CDP error with code `-32000` (`CDP_SERVER_ERROR`) and message `Method not found: <method>`. Commands in flight when the document dies fail with the same code. See the [Frame reference](/reference/frame) for the full request path and the [protocol reference](/reference/protocol) for the error constants.
+Target destruction also emits the schema-defined `Inspector.detached`
+lifecycle event before flattened detach notification or direct-socket close.
+No `Inspector` commands are advertised.
 
-## Intentionally unsupported
+## Deliberate hard limits
 
-Page JavaScript cannot provide these capabilities, so they are out of scope by design — not pending work:
+An in-page implementation cannot become Chromium's DevTools backend.
+Specifically unsupported:
 
-- Screenshots
-- PDF generation
-- File uploads
-- Drag-and-drop
-- Dialogs
-- Real network interception
+- screenshots, screencasts, PDF output, tracing, paint/layout internals, and
+  compositor or GPU state;
+- trusted native input, browser chrome, clipboard permissions, file chooser,
+  drag interception, downloads, or dialog control;
+- native request interception, response rewriting, throttling, cache control,
+  document/subresource coverage, or service-worker traffic;
+- Debugger, Profiler, HeapProfiler, Memory, Audits, Security, Emulation,
+  ServiceWorker, Target worker/OOPIF, and browser-process domains;
+- DOM access inside child-frame documents, closed or user-agent shadow roots,
+  and browser-internal trees;
+- legacy non-flat `Target.sendMessageToTarget` sessions.
 
-The compatibility bar is [agent-browser](/guides/drive-with-agent-browser)'s support matrix: AX-tree snapshots, semantic locators, click/fill/type, eval, waits, console, and SPA history. Raw Playwright over `connectOverCDP` is best-effort, not promised — it exercises commands outside this matrix and will hit the unknown-method error above.
+Generic CDP clients may work when they stay inside the documented surface.
+They should expect a protocol error, not a fabricated result, outside it.

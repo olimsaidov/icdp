@@ -1,3 +1,10 @@
-# The Host is the hub; the Relay uplink is just another consumer
+# The Host owns DevTools state; the Relay transports bytes
 
-The prior art (health-workspaces wmlet) is server-centric: the in-page driver dials the server directly, and even the parent shell's console panel consumes CDP via a browser → server → browser WebSocket loopback. We inverted this: the Host (parent window) owns the Frame Agent channels and fans sessions out to consumers, and the Relay uplink is structurally one consumer among others. This gives parent-window code a local, server-free CDP tap (console panels work with the Relay down), and makes Host + Frame Agent fully testable in a browser without any server. The cost is that the Host must implement real session fan-out (event broadcast to all attached sessions, ref-counted domain enables) instead of a dumb pipe.
+The Host is the only layer with both iframe Pairings and CDP Client context,
+so it owns Targets, Sessions, browser/Target commands, domain-enable state,
+and event routing. The Frame Agent owns only document-facing behavior.
+
+The Relay assigns Client ids, forwards raw CDP messages, and caches Target
+summaries for discovery. Keeping CDP semantics out of the Relay prevents
+split ownership and lets local `host.attach()` Sessions use the same path as
+remote Sessions without a server round trip.

@@ -3,6 +3,7 @@
 // Vendored expected output of Chromium's inspector-protocol accessibility
 // goldens (web_tests/http/tests/inspector-protocol/accessibility/<name>-expected.txt),
 // embedded so the conformance suite runs with no Chromium dependency (CI-safe).
+// Chromium revision: 3093417a828d9cea09f10201d61a72ccd25cf498
 // Regenerate after a Chromium sync or when adding a case: npm run gen:conformance
 
 export const EXPECTED: Record<string, string> = {

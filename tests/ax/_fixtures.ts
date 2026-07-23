@@ -19,7 +19,7 @@ export type AXOptions = {
 /**
  * Build a fresh AX tree from an HTML fragment, the same way the Frame Agent does
  * (calling `getFullAXTree({document, frameId, registry})` directly — no relay or
- * chobitsu plumbing). Returns the flat `nodes[]` exactly as a CDP client receives.
+ * Frame Agent dispatch plumbing). Returns the flat `nodes[]` exactly as a CDP client receives.
  */
 export function build(html: string, title = "Fixture"): AXNode[] {
   document.title = title;

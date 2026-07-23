@@ -158,9 +158,7 @@
     <header>
       <h1>icdp playground shell (Host)</h1>
       <span>relay: <code>{{SHELL_ORIGIN}}</code></span>
-      <span
-        >drive it: <code>agent-browser --cdp {{CDP_PORT}} wait --text "icdp Playground"</code></span
-      >
+      <span>CDP discovery: <code>http://127.0.0.1:{{CDP_PORT}}/json/version</code></span>
     </header>
     <main>
       <div id="targets-grid"></div>
@@ -169,8 +167,8 @@
           <div class="panel-head">
             <b>Targets</b>
             <span class="hint"
-              >open more:
-              <code>agent-browser --cdp {{CDP_PORT}} tab new {{APP_ORIGIN}}/page-two</code></span
+              >open more with <code>Target.createTarget</code> at
+              <code>{{APP_ORIGIN}}/page-two</code></span
             >
           </div>
           <table>

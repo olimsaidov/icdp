@@ -49,11 +49,15 @@ class TestClient {
   private nextId = 1;
   private readonly pending = new Map<number, (message: CdpMessage) => void>();
   readonly events: CdpMessage[] = [];
+  readonly closed: Promise<CloseEvent>;
   private opened: Promise<void>;
 
   constructor(url: string) {
     this.socket = new WebSocket(url);
     this.opened = new Promise((resolve) => this.socket.addEventListener("open", () => resolve()));
+    this.closed = new Promise((resolve) =>
+      this.socket.addEventListener("close", resolve, { once: true }),
+    );
     this.socket.addEventListener("message", (event) => {
       const message = JSON.parse(String(event.data)) as CdpMessage;
       if (message.id != null) {
@@ -85,8 +89,19 @@ class TestClient {
 
 describe("relay + host + frame, end to end", () => {
   let relay: RelayServer;
+  let framePort: MessagePort;
+  const frameMessages: Array<{
+    kind: "attach" | "detach" | "command";
+    sessionId: string;
+    id?: number;
+    method?: string;
+  }> = [];
   const { win, emit } = fakeWindow();
-  const host = new IcdpHost(win);
+  const host = new IcdpHost({
+    window: win,
+    product: "icdp-e2e",
+    onCloseTarget: () => {},
+  });
   const frame = fakeIframe();
   const cleanups: Array<() => unknown> = [() => host.destroy()];
 
@@ -102,7 +117,7 @@ describe("relay + host + frame, end to end", () => {
   test("full command round-trip from a WebSocket client to the frame", async () => {
     host.pair(frame.iframe, { targetId: "preview", origins: [FRAME_ORIGIN] });
     emit({
-      data: { icdp: "hello", v: 1, title: "App", url: `${FRAME_ORIGIN}/` },
+      data: { icdp: "hello", v: 4, title: "App", url: `${FRAME_ORIGIN}/` },
       origin: FRAME_ORIGIN,
       source: frame.contentWindow,
     });
@@ -110,13 +125,34 @@ describe("relay + host + frame, end to end", () => {
       (post) => (post.message as { icdp?: string }).icdp === "welcome",
     );
     if (!welcome) throw new Error("no welcome posted");
-    const framePort = welcome.transfer[0] as MessagePort;
+    framePort = welcome.transfer[0] as MessagePort;
     framePort.onmessage = (event) => {
-      const command = JSON.parse(String(event.data)) as { id: number; method: string };
+      const command = JSON.parse(String(event.data)) as {
+        kind: "attach" | "detach" | "command";
+        sessionId: string;
+        id?: number;
+        method?: string;
+      };
+      frameMessages.push(command);
+      if (command.kind !== "command" || command.id === undefined) return;
       if (command.method === "DOM.getDocument") {
-        framePort.postMessage(JSON.stringify({ id: command.id, result: { root: { nodeId: 1 } } }));
+        framePort.postMessage(
+          JSON.stringify({
+            kind: "response",
+            sessionId: command.sessionId,
+            id: command.id,
+            result: { root: { nodeId: 1 } },
+          }),
+        );
       } else {
-        framePort.postMessage(JSON.stringify({ id: command.id, result: {} }));
+        framePort.postMessage(
+          JSON.stringify({
+            kind: "response",
+            sessionId: command.sessionId,
+            id: command.id,
+            result: {},
+          }),
+        );
       }
     };
 
@@ -153,7 +189,12 @@ describe("relay + host + frame, end to end", () => {
 
     // Frame events reach the client tagged with its sessionId.
     framePort.postMessage(
-      JSON.stringify({ method: "Runtime.consoleAPICalled", params: { type: "log" } }),
+      JSON.stringify({
+        kind: "event",
+        sessionId,
+        method: "Runtime.consoleAPICalled",
+        params: { type: "log" },
+      }),
     );
     await until(
       () => client.events.some((event) => event.method === "Runtime.consoleAPICalled"),
@@ -192,6 +233,81 @@ describe("relay + host + frame, end to end", () => {
       webSocketDebuggerUrl: string;
     }>;
     expect(list[0]?.id).toBe("preview");
-    expect(list[0]?.webSocketDebuggerUrl).toBe(relay.browserWsUrl);
+    expect(list[0]?.webSocketDebuggerUrl).toBe(
+      `ws://127.0.0.1:${relay.browserPort}/devtools/page/preview`,
+    );
+
+    const beforeAttach = frameMessages.length;
+    const direct = new TestClient(list[0]!.webSocketDebuggerUrl);
+    cleanups.push(() => direct.close());
+    const document = await direct.send("DOM.getDocument", { depth: 1 });
+    expect(document).toEqual({ id: 1, result: { root: { nodeId: 1 } } });
+
+    await until(
+      () => frameMessages.slice(beforeAttach).some((message) => message.kind === "attach"),
+      "direct target attachment",
+    );
+    const directSessionId = frameMessages
+      .slice(beforeAttach)
+      .find((message) => message.kind === "attach")?.sessionId;
+    if (!directSessionId) throw new Error("direct target Session was not attached");
+
+    framePort.postMessage(
+      JSON.stringify({
+        kind: "event",
+        sessionId: directSessionId,
+        method: "Runtime.consoleAPICalled",
+        params: { type: "log" },
+      }),
+    );
+    await until(
+      () => direct.events.some((event) => event.method === "Runtime.consoleAPICalled"),
+      "direct target event",
+    );
+    expect(direct.events.at(-1)).toEqual({
+      method: "Runtime.consoleAPICalled",
+      params: { type: "log" },
+    });
+
+    const missing = new WebSocket(`ws://127.0.0.1:${relay.browserPort}/devtools/page/missing`);
+    const closed = new Promise<CloseEvent>((resolve) =>
+      missing.addEventListener("close", resolve, { once: true }),
+    );
+    expect((await closed).code).toBe(1008);
+
+    const nested = await direct.send("Target.attachToTarget", {
+      targetId: "preview",
+      flatten: true,
+    });
+    const nestedSessionId = String((nested.result as { sessionId: string }).sessionId);
+    const closeOutcome = await Promise.race([
+      direct
+        .send("Target.closeTarget", { targetId: "preview" })
+        .then((response) => ({ kind: "response" as const, response })),
+      direct.closed.then(() => ({ kind: "closed" as const })),
+    ]);
+    expect(closeOutcome).toEqual({
+      kind: "response",
+      response: { id: 3, result: { success: true } },
+    });
+    expect((await direct.closed).code).toBe(1001);
+    expect(direct.events.filter((message) => message.method === "Inspector.detached")).toEqual([
+      {
+        method: "Inspector.detached",
+        params: { reason: "Render process gone." },
+      },
+      {
+        method: "Inspector.detached",
+        params: { reason: "Render process gone." },
+        sessionId: nestedSessionId,
+      },
+      {
+        method: "Inspector.detached",
+        params: { reason: "target_closed" },
+      },
+    ]);
+    expect(direct.events.some((message) => message.method === "Target.detachedFromTarget")).toBe(
+      false,
+    );
   });
 });

@@ -29,3 +29,9 @@ jobs:
       # its goldens are vendored in tests/ax/conformance.expected.ts (regenerate
       # locally with `npm run gen:conformance`).
       - run: npm test
+      - run: npm run build
+        if: matrix.node == 24
+      - run: npm run docs:build
+        if: matrix.node == 24
+      - run: npm pack --dry-run
+        if: matrix.node == 24

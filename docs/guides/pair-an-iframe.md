@@ -114,9 +114,14 @@ host.unpair("preview");
 A registered, connected Target can be driven two ways:
 
 - **Locally, with no server in the path.** `host.attach(targetId)` returns a session you send CDP commands on and subscribe to events from directly in the parent window — useful for a console panel or an inline inspector. See [Build a local console panel](/guides/local-console-panel).
-- **Over a Relay, for external Clients.** `host.connectRelay({ url })` opens an uplink to a Relay that exposes a Chrome-compatible CDP endpoint, so tools like agent-browser can attach. See [Run a Relay](/guides/run-a-relay).
+- **Over a Relay, for external Clients.** `host.connectRelay({ url })` opens
+  an uplink to the Chromium-shaped CDP endpoint. Any flat-session Client can
+  attach while staying within the [supported subset](/reference/cdp-support).
+  See [Run a Relay](/guides/run-a-relay).
 
-Both consume the same hub at once: events broadcast to every attached session, and domain enables are ref-counted per Target, so a local panel's `Runtime.enable` and a Client's coexist.
+Both can use the same Target at once, but they receive independent Sessions:
+domain enables, DOM frontend ids, Runtime handles, and events are isolated per
+attachment.
 
 ## Related
 

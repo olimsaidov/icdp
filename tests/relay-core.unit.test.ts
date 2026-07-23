@@ -1,15 +1,15 @@
-import { describe, expect, test, vi } from "vitest";
+import { describe, expect, test } from "vitest";
 
 import type {
-  BridgeBrowserRequest,
   CdpMessage,
   HostToRelayMessage,
   RelayToHostMessage,
+  TargetSummary,
 } from "../src/protocol.ts";
 import { RelayCore, type SocketLike } from "../src/relay/core.ts";
 
 type FakeSocket = SocketLike & {
-  sent: CdpMessage[];
+  sent: unknown[];
   sentRaw: string[];
   closed: { code?: number; reason?: string } | null;
 };
@@ -30,500 +30,428 @@ function fakeSocket(): FakeSocket {
   return socket;
 }
 
-function hostSent(socket: FakeSocket): RelayToHostMessage[] {
-  return socket.sent as unknown as RelayToHostMessage[];
+function bridgeMessages(socket: FakeSocket): RelayToHostMessage[] {
+  return socket.sent as RelayToHostMessage[];
 }
 
-function setup() {
-  const core = new RelayCore({ product: "icdp-test", browserWsUrl: "ws://test/devtools/browser" });
-  const host = fakeSocket();
+function readyHost(
+  core: RelayCore,
+  host: FakeSocket,
+  instanceId = "host-1",
+  targets: TargetSummary[] = [],
+  complete = true,
+): void {
   core.hostConnected(host);
   core.hostMessage(
     host,
     JSON.stringify({
       kind: "ready",
-      v: 1,
-      targets: [{ targetId: "preview", title: "Preview", url: "http://app.test/" }],
+      v: 4,
+      instanceId,
+      targets,
     } satisfies HostToRelayMessage),
   );
-  const client = fakeSocket();
-  core.clientConnected(client);
-  return { core, host, client };
+  if (complete) core.hostMessage(host, JSON.stringify({ kind: "readyComplete" }));
 }
 
-/** Like setup(), but the Host advertises browser-level methods it handles itself. */
-function setupWithHandles(handles: string[]) {
-  const core = new RelayCore({ product: "icdp-test", browserWsUrl: "ws://test/devtools/browser" });
-  const host = fakeSocket();
-  core.hostConnected(host);
-  core.hostMessage(
-    host,
-    JSON.stringify({
-      kind: "ready",
-      v: 1,
-      targets: [{ targetId: "preview", title: "Preview", url: "http://app.test/" }],
-      handles,
-    } satisfies HostToRelayMessage),
-  );
-  const client = fakeSocket();
-  core.clientConnected(client);
-  return { core, host, client };
-}
+describe("Client transport", () => {
+  test("direct Target Clients are identified to the Host", () => {
+    const core = new RelayCore({
+      browserWsUrl: "ws://test/devtools/browser",
+      targetWsUrl: (targetId) => `ws://test/devtools/page/${targetId}`,
+    });
+    const host = fakeSocket();
+    const client = fakeSocket();
+    readyHost(core, host, "host-1", [{ targetId: "one", title: "One", url: "http://app.test/" }]);
 
-function lastResponse(client: FakeSocket): CdpMessage {
-  const message = client.sent.at(-1);
-  if (!message) throw new Error("no message sent to client");
-  return message;
-}
+    core.clientConnected(client, "one");
 
-function attach(core: RelayCore, client: FakeSocket, targetId = "preview"): string {
-  core.clientMessage(
-    client,
-    JSON.stringify({ id: 1, method: "Target.attachToTarget", params: { targetId } }),
-  );
-  const response = lastResponse(client);
-  return (response.result as { sessionId: string }).sessionId;
-}
-
-describe("browser-level methods", () => {
-  test("Browser.getVersion is answered locally", () => {
-    const { core, client } = setup();
-    core.clientMessage(client, JSON.stringify({ id: 7, method: "Browser.getVersion" }));
-    const response = lastResponse(client);
-    expect(response.id).toBe(7);
-    expect((response.result as { product: string }).product).toBe("icdp-test");
-  });
-
-  test("Target.getTargets lists the host's targets", () => {
-    const { core, client } = setup();
-    core.clientMessage(client, JSON.stringify({ id: 1, method: "Target.getTargets" }));
-    const infos = (lastResponse(client).result as { targetInfos: Array<{ targetId: string }> })
-      .targetInfos;
-    expect(infos.map((info) => info.targetId)).toEqual(["preview"]);
-  });
-
-  test("setDiscoverTargets replays existing targets as targetCreated", () => {
-    const { core, client } = setup();
-    core.clientMessage(
-      client,
-      JSON.stringify({ id: 1, method: "Target.setDiscoverTargets", params: { discover: true } }),
-    );
-    const methods = client.sent.map((message) => message.method);
-    expect(methods).toContain("Target.targetCreated");
-  });
-
-  test("non-session command that is not browser-level errors", () => {
-    const { core, client } = setup();
-    core.clientMessage(client, JSON.stringify({ id: 2, method: "DOM.getDocument" }));
-    expect(lastResponse(client).error?.code).toBe(-32601);
-  });
-
-  test("attachToTarget on unknown target errors", () => {
-    const { core, client } = setup();
-    core.clientMessage(
-      client,
-      JSON.stringify({ id: 3, method: "Target.attachToTarget", params: { targetId: "nope" } }),
-    );
-    expect(lastResponse(client).error?.message).toContain("nope");
-  });
-});
-
-describe("session routing", () => {
-  test("attach returns a sessionId and emits attachedToTarget", () => {
-    const { core, client } = setup();
-    const sessionId = attach(core, client);
-    expect(sessionId).toMatch(/^icdp-session-/);
-    expect(client.sent.some((message) => message.method === "Target.attachedToTarget")).toBe(true);
-  });
-
-  test("session command round-trips through the host with id remapping", () => {
-    const { core, host, client } = setup();
-    const sessionId = attach(core, client);
-
-    core.clientMessage(
-      client,
-      JSON.stringify({ id: 42, sessionId, method: "DOM.getDocument", params: { depth: 1 } }),
-    );
-    const command = hostSent(host).at(-1);
-    if (command?.kind !== "command") throw new Error("expected a bridge command");
-    expect(command.targetId).toBe("preview");
-    expect(command.method).toBe("DOM.getDocument");
-    expect(command.id).not.toBe(42);
+    const snapshot = bridgeMessages(host).at(-1);
+    expect(snapshot).toEqual({
+      kind: "clients",
+      clientIds: [expect.stringMatching(/^icdp-client-/)],
+      targetIds: {
+        [snapshot?.kind === "clients" ? snapshot.clientIds[0]! : "missing"]: "one",
+      },
+    });
 
     core.hostMessage(
       host,
       JSON.stringify({
-        kind: "response",
-        sessionId,
-        id: command.id,
-        result: { root: {} },
+        kind: "targetDestroyed",
+        targetId: "one",
       } satisfies HostToRelayMessage),
     );
-    const response = lastResponse(client);
-    expect(response.id).toBe(42);
-    expect(response.sessionId).toBe(sessionId);
-    expect(response.result).toEqual({ root: {} });
+    expect(client.closed).toEqual({ code: 1001, reason: "Target closed" });
+    expect(core.status().clients).toBe(0);
   });
 
-  test("events fan out to every session attached to the target", () => {
-    const { core, host, client } = setup();
-    const sessionA = attach(core, client);
-    const clientB = fakeSocket();
-    core.clientConnected(clientB);
-    const sessionB = attach(core, clientB);
+  test("unknown direct Target Clients are rejected", () => {
+    const core = new RelayCore();
+    const client = fakeSocket();
+
+    core.clientConnected(client, "missing");
+
+    expect(client.closed).toEqual({ code: 1008, reason: "Target not found" });
+    expect(core.status().clients).toBe(0);
+  });
+
+  test("Relay transports each Client's raw CDP messages without owning its Session", () => {
+    const core = new RelayCore();
+    const host = fakeSocket();
+    const client = fakeSocket();
+
+    readyHost(core, host);
+    core.clientConnected(client);
+
+    const clients = bridgeMessages(host).at(-1);
+    expect(clients).toEqual({
+      kind: "clients",
+      clientIds: [expect.stringMatching(/^icdp-client-/)],
+    });
+    if (clients?.kind !== "clients") throw new Error("expected Client snapshot");
+    const clientId = clients.clientIds[0];
+    if (!clientId) throw new Error("expected a Client id");
+
+    const raw = JSON.stringify({ id: 7, method: "Target.getTargets" });
+    core.clientMessage(client, raw);
+    expect(bridgeMessages(host).at(-1)).toEqual({
+      kind: "clientMessage",
+      clientId,
+      message: raw,
+    });
 
     core.hostMessage(
       host,
       JSON.stringify({
-        kind: "event",
-        targetId: "preview",
-        method: "Runtime.consoleAPICalled",
-        params: { type: "log" },
+        kind: "clientMessage",
+        clientId,
+        message: JSON.stringify({ id: 7, result: { targetInfos: [] } }),
       } satisfies HostToRelayMessage),
     );
-
-    const eventA = client.sent.at(-1);
-    const eventB = clientB.sent.at(-1);
-    expect(eventA?.sessionId).toBe(sessionA);
-    expect(eventB?.sessionId).toBe(sessionB);
-    expect(eventA?.method).toBe("Runtime.consoleAPICalled");
+    expect(client.sent.at(-1)).toEqual({ id: 7, result: { targetInfos: [] } });
   });
 
-  test("command with unknown sessionId errors", () => {
-    const { core, client } = setup();
-    core.clientMessage(
-      client,
-      JSON.stringify({ id: 5, sessionId: "bogus", method: "DOM.getDocument" }),
+  test("Client snapshots remove disconnected Clients and survive reconnect of the same Host", () => {
+    const core = new RelayCore();
+    const firstHost = fakeSocket();
+    const firstClient = fakeSocket();
+    const secondClient = fakeSocket();
+    core.clientConnected(firstClient);
+    core.clientConnected(secondClient);
+    readyHost(core, firstHost);
+
+    const initial = bridgeMessages(firstHost).at(-1);
+    if (initial?.kind !== "clients") throw new Error("expected Client snapshot");
+    expect(initial.clientIds).toHaveLength(2);
+    const [, secondClientId] = initial.clientIds;
+    if (!secondClientId) throw new Error("expected second Client id");
+    core.clientDisconnected(firstClient);
+    expect(bridgeMessages(firstHost).at(-1)).toEqual({
+      kind: "clients",
+      clientIds: [secondClientId],
+    });
+
+    const nextHost = fakeSocket();
+    core.hostDisconnected(firstHost);
+    readyHost(core, nextHost, "host-1");
+    expect(secondClient.closed).toBeNull();
+    expect(bridgeMessages(nextHost).at(-1)).toEqual({
+      kind: "clients",
+      clientIds: [secondClientId],
+    });
+  });
+
+  test("a same-Host reconnect closes direct Clients whose Target disappeared offline", () => {
+    const core = new RelayCore();
+    const firstHost = fakeSocket();
+    const direct = fakeSocket();
+    readyHost(core, firstHost, "host-1", [
+      { targetId: "one", title: "One", url: "http://app.test/" },
+    ]);
+    core.clientConnected(direct, "one");
+    const snapshot = bridgeMessages(firstHost).at(-1);
+    if (snapshot?.kind !== "clients" || !snapshot.clientIds[0]) {
+      throw new Error("expected direct Client snapshot");
+    }
+    const clientId = snapshot.clientIds[0];
+
+    core.hostDisconnected(firstHost);
+    const nextHost = fakeSocket();
+    readyHost(core, nextHost, "host-1", [], false);
+
+    expect(direct.closed).toBeNull();
+    core.hostMessage(
+      nextHost,
+      JSON.stringify({
+        kind: "clientMessage",
+        clientId,
+        message: JSON.stringify({ id: 1, result: { success: true } }),
+      }),
     );
-    expect(lastResponse(client).error?.message).toContain("Session not found");
+    expect(direct.sent.at(-1)).toEqual({ id: 1, result: { success: true } });
+    core.hostMessage(nextHost, JSON.stringify({ kind: "readyComplete" }));
+    expect(direct.closed).toEqual({ code: 1001, reason: "Target closed" });
+    expect(core.status().clients).toBe(0);
+    expect(bridgeMessages(nextHost).at(-1)).toEqual({ kind: "clients", clientIds: [] });
   });
 
-  test("client disconnect notifies the host of detached sessions", () => {
-    const { core, host, client } = setup();
-    const sessionId = attach(core, client);
-    core.clientDisconnected(client);
-    const detached = hostSent(host).at(-1);
-    if (detached?.kind !== "detached") throw new Error("expected a detached message");
-    expect(detached.sessionId).toBe(sessionId);
-  });
-});
+  test("a genuinely different Host instance closes existing Clients", () => {
+    const core = new RelayCore();
+    const firstHost = fakeSocket();
+    const client = fakeSocket();
+    readyHost(core, firstHost, "host-1");
+    core.clientConnected(client);
 
-describe("host lifecycle", () => {
-  test("new host wins: old socket closed, targets churned for clients", () => {
-    const { core, host, client } = setup();
-    core.clientMessage(
-      client,
-      JSON.stringify({ id: 1, method: "Target.setDiscoverTargets", params: { discover: true } }),
-    );
-    const sessionId = attach(core, client);
+    const nextHost = fakeSocket();
+    core.hostConnected(nextHost);
 
-    const newHost = fakeSocket();
-    core.hostConnected(newHost);
-    expect(host.closed?.code).toBe(1008);
-    expect(client.sent.some((message) => message.method === "Target.targetDestroyed")).toBe(true);
-    expect(
-      client.sent.some(
-        (message) =>
-          message.method === "Target.detachedFromTarget" &&
-          (message.params as { sessionId: string }).sessionId === sessionId,
-      ),
-    ).toBe(true);
+    expect(firstHost.closed).toBeNull();
+    expect(client.closed).toBeNull();
+    expect(core.status().hostConnected).toBe(true);
 
     core.hostMessage(
-      newHost,
+      nextHost,
       JSON.stringify({
         kind: "ready",
-        v: 1,
-        targets: [{ targetId: "preview", title: "Preview", url: "http://app.test/" }],
+        v: 4,
+        instanceId: "host-2",
+        targets: [],
       } satisfies HostToRelayMessage),
     );
-    expect(
-      client.sent.filter((message) => message.method === "Target.targetCreated").length,
-    ).toBeGreaterThanOrEqual(2);
+
+    expect(firstHost.closed?.code).toBe(1008);
+    expect(client.closed).toEqual({ code: 1012, reason: "Host instance replaced" });
+    expect(bridgeMessages(nextHost).at(-1)).toEqual({ kind: "clients", clientIds: [] });
+    expect(core.status().clients).toBe(0);
   });
 
-  test("host disconnect fails in-flight commands", () => {
-    const { core, host, client } = setup();
-    const sessionId = attach(core, client);
-    core.clientMessage(client, JSON.stringify({ id: 9, sessionId, method: "DOM.getDocument" }));
-    core.hostDisconnected(host);
-    expect(client.sent.some((message) => message.id === 9 && message.error != null)).toBe(true);
-  });
+  test("an invalid contender cannot evict a healthy Host or its Clients", () => {
+    const core = new RelayCore();
+    const host = fakeSocket();
+    const contender = fakeSocket();
+    const client = fakeSocket();
+    readyHost(core, host, "host-1", [{ targetId: "one", title: "One", url: "http://app.test/" }]);
+    core.clientConnected(client);
+    const snapshot = bridgeMessages(host).at(-1);
+    if (snapshot?.kind !== "clients" || !snapshot.clientIds[0]) {
+      throw new Error("expected Client snapshot");
+    }
 
-  test("auto-attach attaches existing and future targets", () => {
-    const { core, host, client } = setup();
-    core.clientMessage(
-      client,
-      JSON.stringify({
-        id: 1,
-        method: "Target.setAutoAttach",
-        params: { autoAttach: true, flatten: true },
-      }),
-    );
-    expect(
-      client.sent.filter((message) => message.method === "Target.attachedToTarget").length,
-    ).toBe(1);
-
+    core.hostConnected(contender);
     core.hostMessage(
-      host,
-      JSON.stringify({
+      contender,
+      JSON.stringify({ kind: "ready", v: 5, instanceId: "future", targets: [] }),
+    );
+    core.clientMessage(client, JSON.stringify({ id: 1, method: "Browser.getVersion" }));
+
+    expect(contender.closed).toEqual({
+      code: 1002,
+      reason: "Incompatible host protocol",
+    });
+    expect(host.closed).toBeNull();
+    expect(client.closed).toBeNull();
+    expect(core.status()).toMatchObject({
+      hostConnected: true,
+      targets: [{ targetId: "one" }],
+      clients: 1,
+    });
+    expect(bridgeMessages(host).at(-1)).toEqual({
+      kind: "clientMessage",
+      clientId: snapshot.clientIds[0],
+      message: JSON.stringify({ id: 1, method: "Browser.getVersion" }),
+    });
+  });
+
+  test("an unvalidated contender cannot send Host traffic", () => {
+    const core = new RelayCore();
+    const host = fakeSocket();
+    const contender = fakeSocket();
+    const client = fakeSocket();
+    readyHost(core, host, "host-1", [{ targetId: "one", title: "One", url: "http://app.test/" }]);
+    core.clientConnected(client);
+    const snapshot = bridgeMessages(host).at(-1);
+    if (snapshot?.kind !== "clients" || !snapshot.clientIds[0]) {
+      throw new Error("expected Client snapshot");
+    }
+    const beforeClientMessages = client.sent.length;
+
+    core.hostConnected(contender);
+    for (const message of [
+      {
         kind: "targetCreated",
-        target: { targetId: "second", title: "Second", url: "http://app.test/2" },
-      } satisfies HostToRelayMessage),
-    );
-    expect(
-      client.sent.filter((message) => message.method === "Target.attachedToTarget").length,
-    ).toBe(2);
+        target: { targetId: "two", title: "Two", url: "http://app.test/two" },
+      },
+      { kind: "targetDestroyed", targetId: "one" },
+      {
+        kind: "clientMessage",
+        clientId: snapshot.clientIds[0],
+        message: JSON.stringify({ id: 1, result: { injected: true } }),
+      },
+    ] satisfies HostToRelayMessage[]) {
+      core.hostMessage(contender, JSON.stringify(message));
+    }
+
+    expect(core.status().targets).toEqual([
+      { targetId: "one", title: "One", url: "http://app.test/" },
+    ]);
+    expect(client.sent).toHaveLength(beforeClientMessages);
   });
-});
 
-describe("host-handled lifecycle methods", () => {
-  test("createTarget is forwarded to the host when advertised", () => {
-    const { core, host, client } = setupWithHandles(["Target.createTarget"]);
-    core.clientMessage(
-      client,
-      JSON.stringify({
-        id: 11,
-        method: "Target.createTarget",
-        params: { url: "http://app.test/new" },
-      }),
-    );
-
-    // It must not be answered locally — instead a browserRequest goes to the Host.
-    expect(client.sent).toHaveLength(0);
-    const request = hostSent(host).at(-1);
-    if (request?.kind !== "browserRequest") throw new Error("expected a browserRequest");
-    expect(request.method).toBe("Target.createTarget");
-    expect(request.params).toEqual({ url: "http://app.test/new" });
-
+  test("an incompatible Host bridge version is rejected before Client sync", () => {
+    const core = new RelayCore();
+    const host = fakeSocket();
+    const client = fakeSocket();
+    core.clientConnected(client);
+    core.hostConnected(host);
     core.hostMessage(
       host,
-      JSON.stringify({
-        kind: "browserResult",
-        id: request.id,
-        result: { targetId: "tab-2" },
-      } satisfies HostToRelayMessage),
+      JSON.stringify({ kind: "ready", v: 5, instanceId: "future", targets: [] }),
     );
-    const response = lastResponse(client);
-    expect(response.id).toBe(11);
-    expect(response.result).toEqual({ targetId: "tab-2" });
-    // Browser-level results are not session-scoped.
-    expect(response.sessionId).toBeUndefined();
+
+    expect(host.closed).toEqual({ code: 1002, reason: "Incompatible host protocol" });
+    expect(bridgeMessages(host)).toEqual([]);
+    expect(core.status().hostConnected).toBe(false);
   });
 
-  test("createTarget falls back to the built-in error when not advertised", () => {
-    const { core, host, client } = setup();
-    core.clientMessage(
-      client,
-      JSON.stringify({ id: 12, method: "Target.createTarget", params: {} }),
-    );
-    expect(hostSent(host).some((message) => message.kind === "browserRequest")).toBe(false);
-    const response = lastResponse(client);
-    expect(response.id).toBe(12);
-    expect(response.error?.message).toContain("not supported");
-  });
-
-  test("a host-rejected createTarget surfaces as a client error", () => {
-    const { core, host, client } = setupWithHandles(["Target.createTarget"]);
-    core.clientMessage(
-      client,
-      JSON.stringify({ id: 13, method: "Target.createTarget", params: {} }),
-    );
-    const request = hostSent(host).at(-1);
-    if (request?.kind !== "browserRequest") throw new Error("expected a browserRequest");
-    core.hostMessage(
-      host,
-      JSON.stringify({
-        kind: "browserResult",
-        id: request.id,
-        error: { code: -32000, message: "popups disabled" },
-      } satisfies HostToRelayMessage),
-    );
-    const response = lastResponse(client);
-    expect(response.id).toBe(13);
-    expect(response.error?.message).toBe("popups disabled");
-  });
-
-  test("closeTarget is forwarded to the host when advertised", () => {
-    const { core, host, client } = setupWithHandles(["Target.closeTarget"]);
-    core.clientMessage(
-      client,
-      JSON.stringify({ id: 14, method: "Target.closeTarget", params: { targetId: "preview" } }),
-    );
-    const request = hostSent(host).at(-1);
-    if (request?.kind !== "browserRequest") throw new Error("expected a browserRequest");
-    expect(request.method).toBe("Target.closeTarget");
-    expect(request.params).toEqual({ targetId: "preview" });
-
-    core.hostMessage(
-      host,
-      JSON.stringify({
-        kind: "browserResult",
-        id: request.id,
-        result: { success: true },
-      } satisfies HostToRelayMessage),
-    );
-    expect(lastResponse(client).result).toEqual({ success: true });
-  });
-
-  test("closeTarget keeps its built-in success default when not advertised", () => {
-    const { core, host, client } = setup();
-    core.clientMessage(
-      client,
-      JSON.stringify({ id: 15, method: "Target.closeTarget", params: { targetId: "preview" } }),
-    );
-    expect(hostSent(host).some((message) => message.kind === "browserRequest")).toBe(false);
-    const response = lastResponse(client);
-    expect(response.id).toBe(15);
-    // CDP's Target.closeTarget returns { success }, not {}.
-    expect(response.result).toEqual({ success: true });
-  });
-
-  test("host disconnect fails an in-flight browser request", () => {
-    const { core, host, client } = setupWithHandles(["Target.createTarget"]);
-    core.clientMessage(
-      client,
-      JSON.stringify({ id: 16, method: "Target.createTarget", params: {} }),
-    );
-    expect(hostSent(host).at(-1)?.kind).toBe("browserRequest");
-
-    core.hostDisconnected(host);
-    const response = lastResponse(client);
-    expect(response.id).toBe(16);
-    expect(response.error?.message).toContain("Host disconnected");
-  });
-
-  test("a browserResult for an unknown id is ignored", () => {
-    const { core, host, client } = setupWithHandles(["Target.createTarget"]);
-    core.hostMessage(
-      host,
-      JSON.stringify({ kind: "browserResult", id: 999, result: {} } satisfies HostToRelayMessage),
-    );
-    expect(client.sent).toHaveLength(0);
-  });
-
-  test("concurrent createTargets correlate by bridge id regardless of reply order", () => {
-    const { core, host, client } = setupWithHandles(["Target.createTarget"]);
-    core.clientMessage(
-      client,
-      JSON.stringify({ id: 21, method: "Target.createTarget", params: { url: "a" } }),
-    );
-    core.clientMessage(
-      client,
-      JSON.stringify({ id: 22, method: "Target.createTarget", params: { url: "b" } }),
-    );
-    const requests = hostSent(host).filter(
-      (message): message is BridgeBrowserRequest => message.kind === "browserRequest",
-    );
-    const [first, second] = requests;
-    if (!first || !second) throw new Error("expected two browserRequests");
-    expect(first.id).not.toBe(second.id);
-
-    // Answer the SECOND request first — correlation must be by bridge id, not order.
-    core.hostMessage(
-      host,
-      JSON.stringify({
-        kind: "browserResult",
-        id: second.id,
-        result: { targetId: "b" },
-      } satisfies HostToRelayMessage),
-    );
-    core.hostMessage(
-      host,
-      JSON.stringify({
-        kind: "browserResult",
-        id: first.id,
-        result: { targetId: "a" },
-      } satisfies HostToRelayMessage),
-    );
-
-    const byClientId = new Map(
-      client.sent
-        .filter((message) => message.id != null)
-        .map((message) => [message.id, message.result]),
-    );
-    expect(byClientId.get(22)).toEqual({ targetId: "b" });
-    expect(byClientId.get(21)).toEqual({ targetId: "a" });
-  });
-
-  test("a session-scoped createTarget is still forwarded to the host", () => {
-    const { core, host, client } = setupWithHandles(["Target.createTarget"]);
-    const sessionId = attach(core, client);
-    core.clientMessage(
-      client,
-      JSON.stringify({ id: 31, sessionId, method: "Target.createTarget", params: {} }),
-    );
-    const request = hostSent(host).at(-1);
-    if (request?.kind !== "browserRequest") throw new Error("expected a browserRequest");
-    expect(request.method).toBe("Target.createTarget");
-
-    core.hostMessage(
-      host,
-      JSON.stringify({
-        kind: "browserResult",
-        id: request.id,
-        result: { targetId: "tab-9" },
-      } satisfies HostToRelayMessage),
-    );
-    const response = lastResponse(client);
-    expect(response.id).toBe(31);
-    expect(response.result).toEqual({ targetId: "tab-9" });
-    // The Client scoped it to a session, so echo that sessionId back.
-    expect(response.sessionId).toBe(sessionId);
-  });
-
-  test("client disconnect drops its in-flight browser request", () => {
-    const { core, host, client } = setupWithHandles(["Target.createTarget"]);
-    core.clientMessage(
-      client,
-      JSON.stringify({ id: 41, method: "Target.createTarget", params: {} }),
-    );
-    const request = hostSent(host).at(-1);
-    if (request?.kind !== "browserRequest") throw new Error("expected a browserRequest");
-
-    core.clientDisconnected(client);
-    const before = client.sent.length;
-    // A late result for the dropped request must be ignored (the entry is gone).
-    core.hostMessage(
-      host,
-      JSON.stringify({
-        kind: "browserResult",
-        id: request.id,
-        result: {},
-      } satisfies HostToRelayMessage),
-    );
-    expect(client.sent.length).toBe(before);
-  });
-
-  test("a browser request times out if the host never answers", () => {
-    vi.useFakeTimers();
-    try {
-      const core = new RelayCore({ browserRequestTimeoutMs: 50 });
+  test("different Relay instances never reuse Client identities", () => {
+    const clientIdFrom = (core: RelayCore): string => {
       const host = fakeSocket();
-      core.hostConnected(host);
+      readyHost(core, host);
+      core.clientConnected(fakeSocket());
+      const snapshot = bridgeMessages(host).at(-1);
+      if (snapshot?.kind !== "clients" || !snapshot.clientIds[0]) {
+        throw new Error("expected Client snapshot");
+      }
+      return snapshot.clientIds[0];
+    };
+
+    expect(clientIdFrom(new RelayCore())).not.toBe(clientIdFrom(new RelayCore()));
+  });
+
+  test("messages for stale Client ids are ignored", () => {
+    const core = new RelayCore();
+    const host = fakeSocket();
+    const client = fakeSocket();
+    readyHost(core, host);
+    core.clientConnected(client);
+    const before = client.sent.length;
+
+    core.hostMessage(
+      host,
+      JSON.stringify({
+        kind: "clientMessage",
+        clientId: "gone",
+        message: JSON.stringify({ id: 1, result: {} }),
+      } satisfies HostToRelayMessage),
+    );
+    expect(client.sent).toHaveLength(before);
+  });
+
+  test("a failed Client socket write cannot break Host message processing", () => {
+    const core = new RelayCore();
+    const host = fakeSocket();
+    const client = fakeSocket();
+    readyHost(core, host);
+    core.clientConnected(client);
+    const snapshot = bridgeMessages(host).at(-1);
+    const clientId = snapshot?.kind === "clients" ? snapshot.clientIds[0] : undefined;
+    if (!clientId) {
+      throw new Error("expected Client snapshot");
+    }
+    client.send = () => {
+      throw new Error("socket is closed");
+    };
+
+    expect(() =>
       core.hostMessage(
         host,
         JSON.stringify({
-          kind: "ready",
-          v: 1,
-          targets: [],
-          handles: ["Target.createTarget"],
+          kind: "clientMessage",
+          clientId,
+          message: '{"id":1,"result":{}}',
         } satisfies HostToRelayMessage),
-      );
-      const client = fakeSocket();
-      core.clientConnected(client);
-      core.clientMessage(
-        client,
-        JSON.stringify({ id: 51, method: "Target.createTarget", params: {} }),
-      );
-      expect(hostSent(host).at(-1)?.kind).toBe("browserRequest");
+      ),
+    ).not.toThrow();
+  });
 
-      vi.advanceTimersByTime(50);
-      const response = lastResponse(client);
-      expect(response.id).toBe(51);
-      expect(response.error?.message).toContain("did not respond");
-    } finally {
-      vi.useRealTimers();
-    }
+  test("a command fails promptly while no Host is connected", () => {
+    const core = new RelayCore();
+    const client = fakeSocket();
+    core.clientConnected(client);
+    core.clientMessage(
+      client,
+      JSON.stringify({ id: 9, sessionId: "s1", method: "DOM.getDocument" }),
+    );
+
+    expect(client.sent.at(-1) as CdpMessage).toEqual({
+      id: 9,
+      sessionId: "s1",
+      error: { code: -32000, message: "Host is not connected" },
+    });
+  });
+
+  test("no-Host failures still apply Chromium envelope parsing", () => {
+    const core = new RelayCore();
+    const client = fakeSocket();
+    core.clientConnected(client);
+
+    core.clientMessage(client, "{");
+    core.clientMessage(client, '{"id":1.5,"method":"Browser.getVersion"}');
+
+    expect(client.sent).toEqual([
+      { error: { code: -32700, message: "Message must be valid JSON" } },
+      {
+        error: {
+          code: -32600,
+          message: "Message must have integer 'id' property",
+        },
+      },
+    ]);
+  });
+});
+
+describe("HTTP discovery cache", () => {
+  test("Host target lifecycle messages are reflected without producing Client CDP events", () => {
+    const core = new RelayCore({
+      browserWsUrl: "ws://test/devtools/browser",
+      targetWsUrl: (targetId) => `ws://test/devtools/page/${targetId}`,
+    });
+    const host = fakeSocket();
+    const client = fakeSocket();
+    readyHost(core, host, "host-1", [{ targetId: "one", title: "One", url: "http://app.test/1" }]);
+    core.clientConnected(client);
+    const before = client.sent.length;
+    expect(core.jsonList()).toEqual([
+      expect.objectContaining({
+        id: "one",
+        url: "http://app.test/1",
+        webSocketDebuggerUrl: "ws://test/devtools/page/one",
+      }),
+    ]);
+
+    core.hostMessage(
+      host,
+      JSON.stringify({
+        kind: "targetInfoChanged",
+        target: { targetId: "one", title: "One v2", url: "http://app.test/2" },
+      } satisfies HostToRelayMessage),
+    );
+    expect(core.status().targets[0]?.url).toBe("http://app.test/2");
+    expect(client.sent).toHaveLength(before);
+
+    core.hostMessage(
+      host,
+      JSON.stringify({ kind: "targetDestroyed", targetId: "one" } satisfies HostToRelayMessage),
+    );
+    expect(core.jsonList()).toEqual([]);
+  });
+
+  test("Host disconnect clears stale discovery targets", () => {
+    const core = new RelayCore();
+    const host = fakeSocket();
+    readyHost(core, host, "host-1", [{ targetId: "one", title: "One", url: "http://app.test/" }]);
+    core.hostDisconnected(host);
+    expect(core.status()).toMatchObject({ hostConnected: false, targets: [] });
   });
 });

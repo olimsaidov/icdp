@@ -13,6 +13,8 @@ export type ServeRelayOptions = {
   product?: string;
   /** Path Clients connect to. Advertised by /json/version. */
   browserPath?: string;
+  /** Prefix for direct Target WebSockets advertised by /json/list. */
+  targetPathPrefix?: string;
   /** Path the Host bridge connects to. */
   hostPath?: string;
   /** Advertised Client endpoint. Defaults to the bound browser host/port/path. */
@@ -30,6 +32,7 @@ export type RelayServer = {
   browserPort: number;
   hostPort: number;
   browserWsUrl: string;
+  targetWsUrl(targetId: string): string;
   hostWsUrl: string;
   stop(): Promise<void>;
 };
@@ -82,6 +85,7 @@ export async function serveRelay(options: ServeRelayOptions = {}): Promise<Relay
   const browserHostname = options.browserHostname ?? "127.0.0.1";
   const hostHostname = options.hostHostname ?? "127.0.0.1";
   const browserPath = options.browserPath ?? "/devtools/browser";
+  const targetPathPrefix = options.targetPathPrefix ?? "/devtools/page/";
   const hostPath = options.hostPath ?? "/icdp/host";
   let core: RelayCore | null = null;
 
@@ -122,7 +126,6 @@ export async function serveRelay(options: ServeRelayOptions = {}): Promise<Relay
 
   const handleUpgrade = (
     kind: "client" | "host",
-    expectedPath: string,
     hostname: string,
     request: IncomingMessage,
     socket: Socket,
@@ -130,14 +133,36 @@ export async function serveRelay(options: ServeRelayOptions = {}): Promise<Relay
   ): void => {
     const url = new URL(request.url ?? "/", `http://${hostname}`);
     if (process.env.ICDP_DEBUG === "1") console.log(`[icdp:${kind}:http] UPGRADE ${url.pathname}`);
-    if (url.pathname !== expectedPath || !core) {
+    let targetId: string | undefined;
+    if (kind === "host") {
+      if (url.pathname !== hostPath) {
+        socket.destroy();
+        return;
+      }
+    } else if (url.pathname !== browserPath) {
+      if (!url.pathname.startsWith(targetPathPrefix)) {
+        socket.destroy();
+        return;
+      }
+      try {
+        targetId = decodeURIComponent(url.pathname.slice(targetPathPrefix.length));
+      } catch {
+        socket.destroy();
+        return;
+      }
+      if (!targetId) {
+        socket.destroy();
+        return;
+      }
+    }
+    if (!core) {
       socket.destroy();
       return;
     }
     const activeCore = core;
     wss.handleUpgrade(request, socket as Socket, head, (ws) => {
       if (kind === "host") activeCore.hostConnected(wrap(ws));
-      else activeCore.clientConnected(wrap(ws));
+      else activeCore.clientConnected(wrap(ws), targetId);
       ws.on("message", (data) => {
         const raw = data.toString();
         if (process.env.ICDP_DEBUG === "1") console.log(`[icdp:${kind}]`, raw.slice(0, 400));
@@ -153,10 +178,10 @@ export async function serveRelay(options: ServeRelayOptions = {}): Promise<Relay
   };
 
   browserServer.on("upgrade", (request, socket, head) =>
-    handleUpgrade("client", browserPath, browserHostname, request, socket as Socket, head),
+    handleUpgrade("client", browserHostname, request, socket as Socket, head),
   );
   hostServer.on("upgrade", (request, socket, head) =>
-    handleUpgrade("host", hostPath, hostHostname, request, socket as Socket, head),
+    handleUpgrade("host", hostHostname, request, socket as Socket, head),
   );
 
   let browserPort = 0;
@@ -165,7 +190,14 @@ export async function serveRelay(options: ServeRelayOptions = {}): Promise<Relay
     browserPort = await listen(browserServer, options.browserPort ?? 0, browserHostname);
     const browserWsUrl =
       options.browserWsUrl ?? `ws://${browserHostname}:${browserPort}${browserPath}`;
-    core = new RelayCore({ product: options.product, browserWsUrl });
+    const targetWsUrl = (targetId: string): string => {
+      const url = new URL(browserWsUrl);
+      url.pathname = `${targetPathPrefix}${encodeURIComponent(targetId)}`;
+      url.search = "";
+      url.hash = "";
+      return url.href;
+    };
+    core = new RelayCore({ product: options.product, browserWsUrl, targetWsUrl });
     hostPort = await listen(hostServer, options.hostPort ?? 0, hostHostname);
     const hostWsUrl = options.hostWsUrl ?? `ws://${hostHostname}:${hostPort}${hostPath}`;
 
@@ -176,6 +208,7 @@ export async function serveRelay(options: ServeRelayOptions = {}): Promise<Relay
       browserPort,
       hostPort,
       browserWsUrl,
+      targetWsUrl,
       hostWsUrl,
       stop: async () => {
         for (const ws of wss.clients) ws.terminate();
