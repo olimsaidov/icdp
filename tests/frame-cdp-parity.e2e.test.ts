@@ -1333,7 +1333,10 @@ test("Page navigate restores Runtime and reports real lifecycle ordering", async
       frameId: expect.any(String),
       loaderId: expect.any(String),
     });
-    expect(icdp).toEqual({ frameId: "icdp-frame" });
+    expect(icdp).toEqual({
+      frameId: "icdp-frame",
+      loaderId: expect.any(String),
+    });
   } finally {
     await harness.close();
   }

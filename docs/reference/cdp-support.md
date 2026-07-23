@@ -97,7 +97,10 @@ Observation is implemented by wrapping page APIs. It cannot see the initial
 document, parser-created subresources, preloads, service workers, workers,
 cache internals, browser extensions, or requests created before enable. It
 does not intercept, block, modify, throttle, or faithfully expose the native
-network stack.
+network stack. Automatic Fetch/XHR redirects produce one lifecycle:
+`requestWillBeSent.request.url` is the requested URL and
+`responseReceived.response.url` is the final URL under the same `requestId`.
+Chromium's intermediate `redirectResponse` hops are unavailable.
 
 ### Page
 
@@ -119,9 +122,12 @@ frame id, `icdp-frame`. A same-document transport reconnect does not look like
 a navigation, while a persisted `pageshow` reports
 `BackForwardCacheRestore`, matching Chromium's navigation type.
 `Page.navigate` accepts only an absolute URL on the current origin, validates
-an optional frame id, and omits `loaderId` because page JavaScript cannot know
-the next browser loader. `Page.reload` validates an optional loader id before
-calling the page reload API.
+an optional frame id, and reserves the next document's loader id for
+cross-document navigation. Fragment navigation omits `loaderId` and emits
+`Page.navigatedWithinDocument`; History API changes and traversal emit the same
+event from Chromium's Navigation API. A cancelled or intercepted navigation
+cannot leak its reserved loader id into a later reload. `Page.reload` validates
+an optional loader id before calling the page reload API.
 
 ### Runtime
 

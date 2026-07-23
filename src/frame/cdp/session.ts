@@ -81,6 +81,7 @@ type ConsoleRecord = {
 
 type PageLifecycleMethod = "Page.domContentEventFired" | "Page.loadEventFired";
 type PageNavigationType = "Navigation" | "BackForwardCacheRestore";
+type SameDocumentNavigationType = Protocol.Page.NavigatedWithinDocumentEvent["navigationType"];
 
 type PageDeliveryState = {
   lifecycle: Set<PageLifecycleMethod>;
@@ -100,6 +101,12 @@ function allocateExecutionContextId(): number {
   nextExecutionContextId = id === MAX_EXECUTION_CONTEXT_ID ? 1 : id + 1;
   return id;
 }
+
+function allocateLoaderId(): string {
+  return `icdp-loader-${Math.random().toString(36).slice(2)}`;
+}
+
+const PENDING_LOADER_ID_KEY = "__icdp_pending_loader_id__";
 
 const FRAME_PARAM_SCHEMAS: Record<string, CdpParamSchema> = {
   "Accessibility.getPartialAXTree": {
@@ -552,13 +559,13 @@ class FrameSession {
       return { model: boxModel(element) } satisfies Protocol.DOM.GetBoxModelResponse;
     }
     if (method === "DOM.resolveNode") {
-      this.validateExecutionContext({ contextId: params.executionContextId });
       const targetFields = ["nodeId", "backendNodeId"].filter(
         (field) => params[field] !== undefined,
       );
       if (targetFields.length !== 1) {
-        throw protocolError(CDP_INVALID_PARAMS, "Invalid parameters");
+        throw protocolError(CDP_SERVER_ERROR, "Either nodeId or backendNodeId must be specified.");
       }
+      this.validateExecutionContext({ contextId: params.executionContextId });
       const node = this.resolveNode(params);
       return {
         object: this.objects.wrap(node, {
@@ -637,17 +644,21 @@ class FrameSession {
       if (next.origin !== currentOrigin) {
         throw new Error("Navigation outside the embedded app's origin is not allowed");
       }
-      this.backend.navigate(next.href);
+      const loaderId = this.backend.navigate(next.href);
       return {
         frameId: "icdp-frame",
+        ...(loaderId === undefined ? {} : { loaderId }),
       } satisfies Protocol.Page.NavigateResponse;
     }
     if (method === "Page.reload") {
+      if (params.loaderId !== undefined && params.loaderId !== this.backend.currentLoaderId()) {
+        throw protocolError(
+          CDP_INVALID_PARAMS,
+          "Reload was discarded because the page already navigated",
+        );
+      }
       this.rejectTruthyOptions(params, ["ignoreCache"]);
       this.rejectPresentOptions(params, ["scriptToEvaluateOnLoad"]);
-      if (params.loaderId !== undefined && params.loaderId !== this.backend.currentLoaderId()) {
-        throw new Error("LoaderId does not match the current one");
-      }
       this.backend.reload();
       return {};
     }
@@ -696,8 +707,6 @@ class FrameSession {
       return await this.evaluate(params);
     }
     if (method === "Runtime.callFunctionOn") {
-      this.rejectPresentOptions(params, ["serializationOptions"]);
-      this.rejectTruthyOptions(params, ["silent", "generatePreview", "userGesture"]);
       if (!validCallArguments(params.arguments)) {
         throw protocolError(CDP_INVALID_PARAMS, "Invalid parameters");
       }
@@ -753,6 +762,15 @@ class FrameSession {
   pageLifecycleEvent(method: PageLifecycleMethod, timestamp: number): void {
     if (!this.enabledDomains.has("Page")) return;
     this.emit(method, { timestamp });
+  }
+
+  pageNavigatedWithinDocument(navigationType: SameDocumentNavigationType, url: string): void {
+    if (!this.enabledDomains.has("Page")) return;
+    this.emit("Page.navigatedWithinDocument", {
+      frameId: "icdp-frame",
+      navigationType,
+      url,
+    } satisfies Protocol.Page.NavigatedWithinDocumentEvent);
   }
 
   private enableNetwork(): void {
@@ -1194,9 +1212,20 @@ class FrameSession {
     const targetCount = [params.objectId, params.executionContextId, params.uniqueContextId].filter(
       (value) => value !== undefined,
     ).length;
-    if (targetCount !== 1) {
-      throw protocolError(CDP_INVALID_PARAMS, "Invalid parameters");
+    if (targetCount > 1) {
+      throw protocolError(
+        CDP_INVALID_PARAMS,
+        "ObjectId, executionContextId and uniqueContextId must mutually exclude each other",
+      );
     }
+    if (targetCount < 1) {
+      throw protocolError(
+        CDP_INVALID_PARAMS,
+        "Either objectId or executionContextId or uniqueContextId must be specified",
+      );
+    }
+    this.rejectPresentOptions(params, ["serializationOptions"]);
+    this.rejectTruthyOptions(params, ["silent", "generatePreview", "userGesture"]);
     this.validateExecutionContext({
       contextId: params.executionContextId,
       uniqueContextId: params.uniqueContextId,
@@ -1565,6 +1594,7 @@ export class FrameBackend {
   private readonly send: FrameBackendOptions["send"];
   private readonly navigatePage: (url: string) => void;
   private readonly reloadPage: () => void;
+  private readonly persistNavigationLoaderId: boolean;
   private readonly onDomContentLoaded = (): void => {
     this.recordPageLifecycle("Page.domContentEventFired");
   };
@@ -1574,6 +1604,10 @@ export class FrameBackend {
   private readonly onPageShow = (event: PageTransitionEvent): void => {
     if (event.persisted) this.recordPageNavigation("BackForwardCacheRestore");
   };
+  private historyApiNavigationUrl: string | undefined;
+  private pageNavigateFragmentUrl: string | undefined;
+  private pendingPageNavigationLoaderId: string | undefined;
+  private sameDocumentNavigation: { type: SameDocumentNavigationType; url: string } | undefined;
   private readonly pageLifecycleJournal = new Map<PageLifecycleMethod, number>();
   private readonly pageDelivery = new Map<string, PageDeliveryState>();
   private pageNavigation: { sequence: number; type: PageNavigationType } = {
@@ -1585,13 +1619,15 @@ export class FrameBackend {
   private restoreAttachShadow: (() => void) | undefined;
   private networkObserver: NetworkObserver | undefined;
   readonly document: Document;
-  private readonly loaderId = `icdp-loader-${Math.random().toString(36).slice(2)}`;
+  private loaderId: string;
   private readonly contextId = allocateExecutionContextId();
   private readonly contextUniqueId = `icdp-context-${Math.random().toString(36).slice(2)}`;
 
   constructor(options: FrameBackendOptions) {
     this.document = options.document;
+    this.loaderId = this.takePendingLoaderId();
     this.send = options.send;
+    this.persistNavigationLoaderId = options.navigate === undefined;
     this.navigatePage =
       options.navigate ??
       ((url) => {
@@ -1607,6 +1643,7 @@ export class FrameBackend {
     this.document.addEventListener("DOMContentLoaded", this.onDomContentLoaded);
     this.document.defaultView?.addEventListener("load", this.onLoad);
     this.document.defaultView?.addEventListener("pageshow", this.onPageShow);
+    this.observeSameDocumentNavigation();
   }
 
   attach(
@@ -1700,6 +1737,121 @@ export class FrameBackend {
     // A persisted pageshow immediately starts the Frame-Agent/Host handshake.
     // Journal the navigation for the restored channel instead of racing an
     // event over the port that the Host is about to replace.
+  }
+
+  private observeSameDocumentNavigation(): void {
+    const navigation = (
+      this.document.defaultView as
+        | (Window & {
+            navigation?: EventTarget & {
+              currentEntry?: { sameDocument?: boolean; url?: string | null };
+            };
+          })
+        | null
+    )?.navigation;
+    if (!navigation) return;
+    const history = this.document.defaultView!.history;
+    const markHistoryApiNavigation = (url: string | URL | null | undefined): string => {
+      const href = url == null ? this.document.URL : new URL(String(url), this.document.URL).href;
+      this.historyApiNavigationUrl = href;
+      return href;
+    };
+    const clearHistoryApiNavigation = (href: string): void => {
+      if (this.historyApiNavigationUrl === href) {
+        this.historyApiNavigationUrl = undefined;
+      }
+    };
+    const emitSameDocumentNavigation = (
+      navigationType: SameDocumentNavigationType,
+      url: string,
+    ): void => {
+      for (const session of this.sessions.values()) {
+        session.pageNavigatedWithinDocument(navigationType, url);
+      }
+    };
+    const wrapHistoryMethod = <T extends "pushState" | "replaceState">(method: T): void => {
+      const original = history[method];
+      history[method] = function (
+        this: History,
+        data: unknown,
+        unused: string,
+        url?: string | URL | null,
+      ): void {
+        const href = markHistoryApiNavigation(url);
+        try {
+          Reflect.apply(original, this, [data, unused, url]);
+        } catch (error) {
+          clearHistoryApiNavigation(href);
+          throw error;
+        }
+        emitSameDocumentNavigation("historyApi", href);
+        queueMicrotask(() => clearHistoryApiNavigation(href));
+      } as History[T];
+    };
+    wrapHistoryMethod("pushState");
+    wrapHistoryMethod("replaceState");
+    navigation.addEventListener("navigate", (rawEvent) => {
+      const event = rawEvent as Event & {
+        destination?: { sameDocument?: boolean; url?: string };
+        hashChange?: boolean;
+        navigationType?: string;
+      };
+      if (!event.destination?.url) return;
+      const pageNavigateFragment = this.pageNavigateFragmentUrl === event.destination.url;
+      this.pageNavigateFragmentUrl = undefined;
+      const historyApiNavigation = this.historyApiNavigationUrl === event.destination.url;
+      this.historyApiNavigationUrl = undefined;
+      if (historyApiNavigation) return;
+      const type =
+        pageNavigateFragment || event.hashChange || event.navigationType === "traverse"
+          ? "fragment"
+          : event.destination.sameDocument
+            ? "fragment"
+            : "other";
+      this.sameDocumentNavigation = { type, url: event.destination.url };
+    });
+    navigation.addEventListener("navigatesuccess", () => {
+      if (!this.sameDocumentNavigation) return;
+      const { type, url } = this.sameDocumentNavigation;
+      this.sameDocumentNavigation = undefined;
+      if (!navigation.currentEntry?.sameDocument || navigation.currentEntry.url !== url) return;
+      this.clearPendingLoaderId();
+      emitSameDocumentNavigation(type, url);
+    });
+    navigation.addEventListener("navigateerror", () => {
+      this.pageNavigateFragmentUrl = undefined;
+      this.sameDocumentNavigation = undefined;
+      this.clearPendingLoaderId();
+    });
+  }
+
+  private takePendingLoaderId(): string {
+    try {
+      const storage = this.document.defaultView?.sessionStorage;
+      const loaderId = storage?.getItem(PENDING_LOADER_ID_KEY);
+      storage?.removeItem(PENDING_LOADER_ID_KEY);
+      if (loaderId?.startsWith("icdp-loader-")) return loaderId;
+    } catch {}
+    return allocateLoaderId();
+  }
+
+  private rememberPendingLoaderId(loaderId: string): void {
+    this.pendingPageNavigationLoaderId = loaderId;
+    try {
+      this.document.defaultView?.sessionStorage.setItem(PENDING_LOADER_ID_KEY, loaderId);
+    } catch {}
+  }
+
+  private clearPendingLoaderId(): void {
+    const loaderId = this.pendingPageNavigationLoaderId;
+    this.pendingPageNavigationLoaderId = undefined;
+    if (!loaderId) return;
+    try {
+      const storage = this.document.defaultView?.sessionStorage;
+      if (storage?.getItem(PENDING_LOADER_ID_KEY) === loaderId) {
+        storage.removeItem(PENDING_LOADER_ID_KEY);
+      }
+    } catch {}
   }
 
   private pageDeliveryFor(sessionId: string): PageDeliveryState {
@@ -1860,8 +2012,23 @@ export class FrameBackend {
     };
   }
 
-  navigate(url: string): void {
-    this.navigatePage(url);
+  navigate(url: string): string | undefined {
+    const current = new URL(this.document.URL);
+    const next = new URL(url);
+    current.hash = "";
+    next.hash = "";
+    const sameDocument = url.includes("#") && current.href === next.href;
+    const loaderId = sameDocument ? undefined : allocateLoaderId();
+    this.pageNavigateFragmentUrl = sameDocument ? url : undefined;
+    if (loaderId && this.persistNavigationLoaderId) this.rememberPendingLoaderId(loaderId);
+    try {
+      this.navigatePage(url);
+    } catch (error) {
+      this.pageNavigateFragmentUrl = undefined;
+      this.clearPendingLoaderId();
+      throw error;
+    }
+    return loaderId;
   }
 
   reload(): void {

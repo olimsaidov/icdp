@@ -1581,9 +1581,22 @@ test("Page.navigate validates the URL and delegates same-origin navigation", asy
     id: 22,
     result: {
       frameId: "icdp-frame",
+      loaderId: expect.any(String),
     },
   });
-  expect(messages[0].result).not.toHaveProperty("loaderId");
+
+  const fragment = new URL("#next", document.URL).href;
+  await backend.command({
+    kind: "command",
+    sessionId: "session-a",
+    id: 222,
+    method: "Page.navigate",
+    params: { url: fragment },
+  });
+  expect(navigations).toEqual([destination, fragment]);
+  expect(messages.find((message) => message.id === 222)?.result).toEqual({
+    frameId: "icdp-frame",
+  });
 
   await backend.command({
     kind: "command",
@@ -1596,6 +1609,62 @@ test("Page.navigate validates the URL and delegates same-origin navigation", asy
     code: -32000,
     message: "Cannot navigate to invalid URL",
   });
+});
+
+test("matches Chromium target and stale-loader validation errors", async () => {
+  const messages: any[] = [];
+  const backend = new FrameBackend({
+    document,
+    send: (message) => messages.push(message),
+  });
+  backend.attach("session-a", []);
+  const commands = [
+    ["DOM.resolveNode", {}],
+    ["DOM.resolveNode", { nodeId: 1, backendNodeId: 1 }],
+    ["Page.reload", { ignoreCache: true, loaderId: "stale-loader" }],
+    ["Runtime.callFunctionOn", { functionDeclaration: "function () {}", silent: true }],
+    [
+      "Runtime.callFunctionOn",
+      {
+        objectId: "object",
+        executionContextId: backend.executionContext().id,
+        functionDeclaration: "function () {}",
+      },
+    ],
+  ] as const;
+
+  for (const [index, [method, params]] of commands.entries()) {
+    await backend.command({
+      kind: "command",
+      sessionId: "session-a",
+      id: 230 + index,
+      method,
+      params,
+    });
+  }
+
+  expect(messages.map((message) => message.error)).toEqual([
+    {
+      code: -32000,
+      message: "Either nodeId or backendNodeId must be specified.",
+    },
+    {
+      code: -32000,
+      message: "Either nodeId or backendNodeId must be specified.",
+    },
+    {
+      code: -32602,
+      message: "Reload was discarded because the page already navigated",
+    },
+    {
+      code: -32602,
+      message: "Either objectId or executionContextId or uniqueContextId must be specified",
+    },
+    {
+      code: -32602,
+      message: "ObjectId, executionContextId and uniqueContextId must mutually exclude each other",
+    },
+  ]);
 });
 
 test("commands reject meaningful options the in-page backend cannot honor", async () => {

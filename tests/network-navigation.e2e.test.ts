@@ -193,7 +193,7 @@ describe("Network and navigation through a real Chromium client", () => {
     expect(failed.params.errorText.length).toBeGreaterThan(0);
   });
 
-  test("reports Chromium-shaped redirect hops on one request id", async () => {
+  test("reports the observable final response when Fetch follows a redirect", async () => {
     const start = harness.icdp.events.length;
     const redirectUrl = `${harness.appOrigin}/api/redirect`;
     const finalUrl = `${harness.appOrigin}/api/text?from=redirect`;
@@ -221,16 +221,38 @@ describe("Network and navigation through a real Chromium client", () => {
     const requests = harness.icdp.events
       .slice(start)
       .filter((event) => event.method === "Network.requestWillBeSent");
+    const requestId = response.params.requestId;
 
-    expect(requests).toHaveLength(2);
-    expect(requests.map((event) => event.params.requestId)).toEqual([
-      response.params.requestId,
-      response.params.requestId,
+    expect(requests).toEqual([
+      expect.objectContaining({
+        params: expect.objectContaining({
+          requestId,
+          request: expect.objectContaining({ url: redirectUrl }),
+        }),
+      }),
     ]);
-    expect(requests.map((event) => event.params.request.url)).toEqual([redirectUrl, finalUrl]);
-    expect(requests[1]!.params.redirectResponse).toMatchObject({
-      url: redirectUrl,
-      status: 302,
+    expect(response.params).toMatchObject({
+      requestId,
+      response: {
+        url: finalUrl,
+        status: 200,
+      },
+    });
+    expect(requests[0]!.params).not.toHaveProperty("redirectResponse");
+    expect(
+      harness.icdp.events
+        .slice(start)
+        .filter((event) => event.params.requestId === requestId)
+        .map((event) => event.method),
+    ).toEqual([
+      "Network.requestWillBeSent",
+      "Network.responseReceived",
+      "Network.dataReceived",
+      "Network.loadingFinished",
+    ]);
+    expect(await harness.icdp.send("Network.getResponseBody", { requestId })).toEqual({
+      body: "network-body",
+      base64Encoded: false,
     });
   });
 
@@ -342,24 +364,147 @@ describe("Network and navigation through a real Chromium client", () => {
           ),
         ),
     ).toEqual([]);
+    expect(
+      harness.icdp.events
+        .slice(start)
+        .filter((event) => event.method === "Page.navigatedWithinDocument")
+        .map((event) => event.params),
+    ).toEqual([
+      {
+        frameId: "icdp-frame",
+        navigationType: "fragment",
+        url: `${harness.appOrigin}/history-one`,
+      },
+      {
+        frameId: "icdp-frame",
+        navigationType: "fragment",
+        url: `${harness.appOrigin}/history-two`,
+      },
+    ]);
   });
 
   test("reports same-document History API changes to Page clients", async () => {
     const start = harness.icdp.events.length;
-    const url = `${harness.appOrigin}/history-event`;
+    const pushedUrl = `${harness.appOrigin}/history-event`;
+    const replacedUrl = `${harness.appOrigin}/history-replaced`;
 
-    await harness.evaluate(`history.pushState({}, "", ${JSON.stringify(url)})`);
-    const event = harness.icdp.events
-      .slice(start)
-      .find((candidate) => candidate.method === "Page.navigatedWithinDocument");
+    await harness.evaluate(`
+      history.pushState({}, "", ${JSON.stringify(pushedUrl)});
+      history.replaceState({}, "", ${JSON.stringify(replacedUrl)});
+    `);
 
-    expect(event).toEqual({
+    expect(
+      harness.icdp.events
+        .slice(start)
+        .filter((event) => event.method === "Page.navigatedWithinDocument"),
+    ).toEqual([
+      {
+        method: "Page.navigatedWithinDocument",
+        params: {
+          frameId: "icdp-frame",
+          navigationType: "historyApi",
+          url: pushedUrl,
+        },
+      },
+      {
+        method: "Page.navigatedWithinDocument",
+        params: {
+          frameId: "icdp-frame",
+          navigationType: "historyApi",
+          url: replacedUrl,
+        },
+      },
+    ]);
+  });
+
+  test("reports repeated Page.navigate fragments without a loader", async () => {
+    const baseUrl = `${harness.appOrigin}/history-replaced`;
+    const url = `${harness.appOrigin}/history-replaced#same-fragment`;
+    await harness.evaluate(`history.replaceState({}, "", ${JSON.stringify(baseUrl)})`);
+    const navigate = async (destination: string) => {
+      const start = harness.icdp.events.length;
+      const response = await harness.icdp.send("Page.navigate", { url: destination });
+      const event = await harness.icdp.waitForEvent(
+        "Page.navigatedWithinDocument",
+        (params) => params.url === destination,
+        start,
+      );
+      expect(response).toEqual({ frameId: "icdp-frame" });
+      expect(event.params).toEqual({
+        frameId: "icdp-frame",
+        navigationType: "fragment",
+        url: destination,
+      });
+    };
+
+    await navigate(url);
+    await navigate(url);
+  });
+
+  test("reports a Navigation API interception as other", async () => {
+    const start = harness.icdp.events.length;
+    const url = `${harness.appOrigin}/intercepted`;
+
+    expect(
+      await harness.evaluate(`
+        new Promise((resolve, reject) => {
+          const listener = (event) => {
+            if (event.destination.url !== ${JSON.stringify(url)}) return;
+            navigation.removeEventListener("navigate", listener);
+            event.intercept({ handler: async () => {} });
+          };
+          navigation.addEventListener("navigate", listener);
+          navigation.navigate(${JSON.stringify(url)}).finished.then(
+            () => resolve(location.href),
+            reject,
+          );
+        })
+      `),
+    ).toBe(url);
+    expect(
+      await harness.icdp.waitForEvent(
+        "Page.navigatedWithinDocument",
+        (params) => params.url === url,
+        start,
+      ),
+    ).toEqual({
       method: "Page.navigatedWithinDocument",
       params: {
         frameId: "icdp-frame",
-        navigationType: "historyApi",
+        navigationType: "other",
         url,
       },
     });
+  });
+
+  test("does not reuse a cancelled Page.navigate loader on reload", async () => {
+    const before = await harness.icdp.send("Page.getFrameTree");
+    const currentUrl = before.frameTree.frame.url;
+    const cancelledUrl = `${harness.appOrigin}/cancelled`;
+    await harness.evaluate(`
+      navigation.addEventListener("navigate", (event) => {
+        if (event.destination.url === ${JSON.stringify(cancelledUrl)}) event.preventDefault();
+      }, { once: true });
+    `);
+
+    const cancelled = await harness.icdp.send("Page.navigate", { url: cancelledUrl });
+    expect(cancelled).toMatchObject({
+      frameId: "icdp-frame",
+      loaderId: expect.any(String),
+    });
+    expect((await harness.icdp.send("Page.getFrameTree")).frameTree.frame.loaderId).toBe(
+      before.frameTree.frame.loaderId,
+    );
+    await harness.evaluate("new Promise((resolve) => setTimeout(resolve, 0))");
+
+    const start = harness.icdp.events.length;
+    await harness.icdp.send("Page.reload");
+    const navigated = await harness.icdp.waitForEvent(
+      "Page.frameNavigated",
+      (params) => params.frame?.url === currentUrl,
+      start,
+    );
+    expect(navigated.params.frame.loaderId).not.toBe(cancelled.loaderId);
+    expect(navigated.params.frame.loaderId).not.toBe(before.frameTree.frame.loaderId);
   });
 });
