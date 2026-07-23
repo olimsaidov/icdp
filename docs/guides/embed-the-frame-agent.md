@@ -54,5 +54,5 @@ both ends must accept the handshake.
 
 The Frame Agent cannot provide screenshots/PDF, trusted native input, the
 browser network stack, V8 debugging, workers, or cross-origin child-frame
-DOM. See [CDP support](/reference/cdp-support) for the exact 37 commands and
+DOM. See [CDP support](/reference/cdp-support) for the exact 38 commands and
 hard limits.

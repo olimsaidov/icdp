@@ -1,19 +1,45 @@
 import type Protocol from "devtools-protocol";
 
 const MISSING_OBJECT = "Could not find object with given id";
+const INVALID_OBJECT_ID = "Invalid remote object id";
+const MISSING_CONTEXT = "Cannot find context with specified id";
 const CANNOT_RETURN_BY_VALUE = "Object couldn't be returned by value";
 const REFERENCE_CHAIN_TOO_LONG = "Object reference chain is too long";
+const INT32_MIN = -(2n ** 31n);
+const INT32_MAX = 2n ** 31n - 1n;
+const INT64_MIN = -(2n ** 63n);
+const INT64_MAX = 2n ** 63n - 1n;
 let fallbackScope = 0;
 
 function createScope(): string {
-  try {
-    return globalThis.crypto.randomUUID();
-  } catch {
-    fallbackScope += 1;
-    return `${Date.now().toString(36)}-${fallbackScope.toString(36)}-${Math.random()
-      .toString(36)
-      .slice(2)}`;
-  }
+  fallbackScope += 1;
+  return `${Math.floor(Math.random() * Number.MAX_SAFE_INTEGER)}.${fallbackScope}`;
+}
+
+function parseIntegerComponent(
+  value: string,
+  minimum: bigint,
+  maximum: bigint,
+  clamp = false,
+): bigint | undefined {
+  const match = /^[\t-\r ]*([+-]?\d+)$/.exec(value);
+  if (!match) return;
+  const integer = BigInt(match[1]!);
+  if (clamp) return integer < minimum ? minimum : integer > maximum ? maximum : integer;
+  return integer >= minimum && integer <= maximum ? integer : undefined;
+}
+
+function parseRemoteObjectId(value: string): { canonicalId: string; scope: string } | undefined {
+  const parts = value.split(".");
+  if (parts.length !== 3) return;
+  // V8 parses the isolate id with strtoll, which saturates on overflow, while
+  // the context and object ids must fit C++'s signed int.
+  const isolateId = parseIntegerComponent(parts[0]!, INT64_MIN, INT64_MAX, true);
+  const contextId = parseIntegerComponent(parts[1]!, INT32_MIN, INT32_MAX);
+  const objectId = parseIntegerComponent(parts[2]!, INT32_MIN, INT32_MAX);
+  if (isolateId === undefined || contextId === undefined || objectId === undefined) return;
+  const scope = `${isolateId}.${contextId}`;
+  return { canonicalId: `${scope}.${objectId}`, scope };
 }
 
 export interface WrapOptions {
@@ -26,11 +52,162 @@ interface StoredObject {
   value: unknown;
 }
 
+type Getter = (this: unknown) => unknown;
+
+const getPrototypeOf = Object.getPrototypeOf;
+const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const functionToString = Function.prototype.toString;
+const functionHasInstance = Function.prototype[Symbol.hasInstance];
+const mapSize = getOwnPropertyDescriptor(Map.prototype, "size")?.get;
+const setSize = getOwnPropertyDescriptor(Set.prototype, "size")?.get;
+const regexpSource = getOwnPropertyDescriptor(RegExp.prototype, "source")?.get;
+const regexpFlags = (
+  [
+    ["hasIndices", "d"],
+    ["global", "g"],
+    ["ignoreCase", "i"],
+    ["multiline", "m"],
+    ["dotAll", "s"],
+    ["unicode", "u"],
+    ["unicodeSets", "v"],
+    ["sticky", "y"],
+  ] as const
+).map(([name, flag]) => [getOwnPropertyDescriptor(RegExp.prototype, name)?.get, flag] as const);
+const dateToString = Date.prototype.toString;
+const weakMapHas = WeakMap.prototype.has;
+const weakSetHas = WeakSet.prototype.has;
+const arrayBufferByteLength = getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength")?.get;
+const dataViewByteLength = getOwnPropertyDescriptor(DataView.prototype, "byteLength")?.get;
+const typedArrayTag = getOwnPropertyDescriptor(
+  getPrototypeOf(Uint8Array.prototype),
+  Symbol.toStringTag,
+)?.get;
+const typedArrayLength = getOwnPropertyDescriptor(
+  getPrototypeOf(Uint8Array.prototype),
+  "length",
+)?.get;
+const brandProbe = {};
+
+function globalConstructor(name: string): Function | undefined {
+  const value = (globalThis as unknown as Record<string, unknown>)[name];
+  return typeof value === "function" ? value : undefined;
+}
+
+function intrinsicGetter(intrinsicName: string, name: PropertyKey): Getter | undefined {
+  const constructor = globalConstructor(intrinsicName) as { prototype?: object } | undefined;
+  let prototype: object | null | undefined = constructor?.prototype;
+  for (; prototype; prototype = getPrototypeOf(prototype) as object | null) {
+    const descriptor = getOwnPropertyDescriptor(prototype, name);
+    if (descriptor) return typeof descriptor.get === "function" ? descriptor.get : undefined;
+  }
+}
+
+function intrinsicMethod(intrinsicName: string, name: PropertyKey): CallableFunction | undefined {
+  const constructor = globalConstructor(intrinsicName) as { prototype?: object } | undefined;
+  let prototype: object | null | undefined = constructor?.prototype;
+  for (; prototype; prototype = getPrototypeOf(prototype) as object | null) {
+    const descriptor = getOwnPropertyDescriptor(prototype, name);
+    if (descriptor) return typeof descriptor.value === "function" ? descriptor.value : undefined;
+  }
+}
+
+const collectionLengths = [
+  ["NodeList", intrinsicGetter("NodeList", "length")],
+  ["HTMLCollection", intrinsicGetter("HTMLCollection", "length")],
+  ["HTMLAllCollection", intrinsicGetter("HTMLAllCollection", "length")],
+  ["DOMTokenList", intrinsicGetter("DOMTokenList", "length")],
+] as const;
+const domExceptionName = intrinsicGetter("DOMException", "name");
+const domExceptionMessage = intrinsicGetter("DOMException", "message");
+const domExceptionToString = intrinsicMethod("DOMException", "toString");
+const sharedArrayBufferByteLength = intrinsicGetter("SharedArrayBuffer", "byteLength");
+const trustedTypes = ["TrustedHTML", "TrustedScript", "TrustedScriptURL"].map(
+  (name) => [name, globalConstructor(name), intrinsicMethod(name, "toString")] as const,
+);
+const nodeConstructor = globalConstructor("Node");
+const nodeType = intrinsicGetter("Node", "nodeType");
+const nodeName = intrinsicGetter("Node", "nodeName");
+const elementLocalName = intrinsicGetter("Element", "localName");
+const elementId = intrinsicGetter("Element", "id");
+const elementClassList = intrinsicGetter("Element", "classList");
+const documentTypeName = intrinsicGetter("DocumentType", "name");
+const domExceptionConstructor = globalConstructor("DOMException");
+const errorConstructor = Error;
+const errorIsError = (
+  Error as typeof Error & {
+    isError?: (value: unknown) => boolean;
+  }
+).isError;
+const promiseConstructor = Promise;
+
+function callGetter<T>(getter: Getter | undefined, value: unknown): T | undefined {
+  if (!getter) return;
+  try {
+    return Reflect.apply(getter, value, []) as T;
+  } catch {
+    return;
+  }
+}
+
+function callMethod<T>(
+  method: CallableFunction | undefined,
+  value: unknown,
+  args: unknown[] = [],
+): T | undefined {
+  if (!method) return;
+  try {
+    return Reflect.apply(method, value, args) as T;
+  } catch {
+    return;
+  }
+}
+
+function isIntrinsicInstance(value: unknown, constructor: Function | undefined): boolean {
+  if (!constructor) return false;
+  try {
+    return Reflect.apply(functionHasInstance, constructor, [value]) as boolean;
+  } catch {
+    return false;
+  }
+}
+
+function hasNativeConstructor(value: object, name: string): boolean {
+  try {
+    for (
+      let prototype = getPrototypeOf(value) as object | null;
+      prototype;
+      prototype = getPrototypeOf(prototype) as object | null
+    ) {
+      const constructor = getOwnPropertyDescriptor(prototype, "constructor")?.value;
+      if (typeof constructor !== "function") continue;
+      const intrinsicName = getOwnPropertyDescriptor(constructor, "name")?.value;
+      if (
+        intrinsicName === name &&
+        callMethod<string>(functionToString, constructor)?.includes("[native code]")
+      ) {
+        return true;
+      }
+    }
+  } catch {}
+  return false;
+}
+
+function isErrorObject(value: object): boolean {
+  if (errorIsError) {
+    try {
+      return Reflect.apply(errorIsError, errorConstructor, [value]) as boolean;
+    } catch {
+      return false;
+    }
+  }
+  return isIntrinsicInstance(value, errorConstructor);
+}
+
 function constructorName(value: object, fallback: string): string {
   try {
-    const prototype = Object.getPrototypeOf(value) as object | null;
+    const prototype = getPrototypeOf(value) as object | null;
     const constructor = prototype
-      ? Object.getOwnPropertyDescriptor(prototype, "constructor")?.value
+      ? getOwnPropertyDescriptor(prototype, "constructor")?.value
       : undefined;
     if (
       typeof constructor === "function" &&
@@ -46,13 +223,37 @@ function constructorName(value: object, fallback: string): string {
 }
 
 function dataProperty(value: object, name: PropertyKey): unknown {
-  let owner: object | null = value;
-  while (owner) {
-    const descriptor = Object.getOwnPropertyDescriptor(owner, name);
-    if (descriptor) return "value" in descriptor ? descriptor.value : undefined;
-    owner = Object.getPrototypeOf(owner) as object | null;
-  }
+  try {
+    let owner: object | null = value;
+    while (owner) {
+      const descriptor = getOwnPropertyDescriptor(owner, name);
+      if (descriptor) return "value" in descriptor ? descriptor.value : undefined;
+      owner = getPrototypeOf(owner) as object | null;
+    }
+  } catch {}
   return undefined;
+}
+
+function className(value: object, fallback: string): string {
+  const tag = dataProperty(value, Symbol.toStringTag);
+  return typeof tag === "string" && tag ? tag : constructorName(value, fallback);
+}
+
+function describeNode(node: object): string {
+  const doctype = callGetter<string>(documentTypeName, node);
+  if (doctype !== undefined) return `<!DOCTYPE ${doctype}>`;
+  const localName = callGetter<string>(elementLocalName, node);
+  if (localName === undefined) return callGetter<string>(nodeName, node) ?? "Node";
+  let description = localName;
+  const id = callGetter<string>(elementId, node);
+  if (id) description += `#${id}`;
+  const classes = callGetter<ArrayLike<string>>(elementClassList, node);
+  if (!classes) return description;
+  const classCount = classes.length;
+  for (let index = 0; index < classCount; index++) {
+    description += `.${classes[index]}`;
+  }
+  return description;
 }
 
 function describeReference(
@@ -62,131 +263,194 @@ function describeReference(
     return { type: "symbol", description: String(value) };
   }
   if (typeof value === "function") {
-    let description: string;
-    try {
-      description = Function.prototype.toString.call(value);
-    } catch {
-      description = "function () { [native code] }";
-    }
+    const description =
+      callMethod<string>(functionToString, value) ?? "function () { [native code] }";
     return { type: "function", className: "Function", description };
   }
-  if (typeof Node !== "undefined" && value instanceof Node) {
+  if (
+    isIntrinsicInstance(value, nodeConstructor) ||
+    callGetter<number>(nodeType, value) !== undefined
+  ) {
     return {
       type: "object",
       subtype: "node",
       className: constructorName(value, "Node"),
-      description: value instanceof Element ? value.outerHTML : value.nodeName,
+      description: describeNode(value),
     };
   }
-  if (Array.isArray(value)) {
+  let isArray = false;
+  try {
+    isArray = Array.isArray(value);
+  } catch {}
+  if (isArray) {
     return {
       type: "object",
       subtype: "array",
       className: "Array",
-      description: `Array(${value.length})`,
+      description: `Array(${(value as unknown[]).length})`,
     };
   }
 
-  const tag = Object.prototype.toString.call(value).slice(8, -1);
-  if (ArrayBuffer.isView(value)) {
-    if (tag === "DataView") {
-      return {
-        type: "object",
-        subtype: "dataview",
-        className: "DataView",
-        description: `DataView(${value.byteLength})`,
-      };
-    }
-    const className = constructorName(value, tag);
+  const dataViewLength = callGetter<number>(dataViewByteLength, value);
+  if (dataViewLength !== undefined) {
+    return {
+      type: "object",
+      subtype: "dataview",
+      className: "DataView",
+      description: `DataView(${dataViewLength})`,
+    };
+  }
+
+  const typedArrayName = callGetter<string>(typedArrayTag, value);
+  if (typedArrayName) {
+    const length = callGetter<number>(typedArrayLength, value) ?? 0;
     return {
       type: "object",
       subtype: "typedarray",
-      className,
-      description: `${className}(${(value as unknown as { length: number }).length})`,
+      className: typedArrayName,
+      description: `${typedArrayName}(${length})`,
     };
   }
 
-  switch (tag) {
-    case "Date":
+  for (const [name, lengthGetter] of collectionLengths) {
+    const length = callGetter<number>(lengthGetter, value);
+    if (length !== undefined) {
       return {
         type: "object",
-        subtype: "date",
-        className: "Date",
-        description: Date.prototype.toString.call(value),
+        subtype: "array",
+        className: name,
+        description: `${name}(${length})`,
       };
-    case "Map":
-      return {
-        type: "object",
-        subtype: "map",
-        className: "Map",
-        description: `Map(${Reflect.getOwnPropertyDescriptor(Map.prototype, "size")!.get!.call(
-          value,
-        )})`,
-      };
-    case "Set":
-      return {
-        type: "object",
-        subtype: "set",
-        className: "Set",
-        description: `Set(${Reflect.getOwnPropertyDescriptor(Set.prototype, "size")!.get!.call(
-          value,
-        )})`,
-      };
-    case "WeakMap":
-      return {
-        type: "object",
-        subtype: "weakmap",
-        className: "WeakMap",
-        description: "WeakMap",
-      };
-    case "WeakSet":
-      return {
-        type: "object",
-        subtype: "weakset",
-        className: "WeakSet",
-        description: "WeakSet",
-      };
-    case "RegExp":
-      return {
-        type: "object",
-        subtype: "regexp",
-        className: "RegExp",
-        description: RegExp.prototype.toString.call(value),
-      };
-    case "Error": {
-      const className = constructorName(value, "Error");
-      const stack = dataProperty(value, "stack");
-      const message = dataProperty(value, "message");
-      return {
-        type: "object",
-        subtype: "error",
-        className,
-        description:
-          typeof stack === "string" && stack
-            ? stack
-            : `${className}${typeof message === "string" && message ? `: ${message}` : ""}`,
-      };
-    }
-    case "Promise":
-      return {
-        type: "object",
-        subtype: "promise",
-        className: "Promise",
-        description: "Promise",
-      };
-    case "ArrayBuffer":
-    case "SharedArrayBuffer":
-      return {
-        type: "object",
-        subtype: "arraybuffer",
-        className: tag,
-        description: `${tag}(${(value as ArrayBuffer).byteLength})`,
-      };
-    default: {
-      const className = constructorName(value, tag);
-      return { type: "object", className, description: className };
     }
   }
+
+  const dateDescription = callMethod<string>(dateToString, value);
+  if (dateDescription !== undefined) {
+    return {
+      type: "object",
+      subtype: "date",
+      className: "Date",
+      description: dateDescription,
+    };
+  }
+
+  const currentMapSize = callGetter<number>(mapSize, value);
+  if (currentMapSize !== undefined) {
+    return {
+      type: "object",
+      subtype: "map",
+      className: "Map",
+      description: `Map(${currentMapSize})`,
+    };
+  }
+  const currentSetSize = callGetter<number>(setSize, value);
+  if (currentSetSize !== undefined) {
+    return {
+      type: "object",
+      subtype: "set",
+      className: "Set",
+      description: `Set(${currentSetSize})`,
+    };
+  }
+  if (callMethod<boolean>(weakMapHas, value, [brandProbe]) !== undefined) {
+    return {
+      type: "object",
+      subtype: "weakmap",
+      className: "WeakMap",
+      description: "WeakMap",
+    };
+  }
+  if (callMethod<boolean>(weakSetHas, value, [brandProbe]) !== undefined) {
+    return {
+      type: "object",
+      subtype: "weakset",
+      className: "WeakSet",
+      description: "WeakSet",
+    };
+  }
+
+  const source = callGetter<string>(regexpSource, value);
+  if (source !== undefined) {
+    const flags = regexpFlags
+      .filter(([getter]) => callGetter<boolean>(getter, value))
+      .map(([, flag]) => flag)
+      .join("");
+    return {
+      type: "object",
+      subtype: "regexp",
+      className: "RegExp",
+      description: `/${source}/${flags}`,
+    };
+  }
+
+  const exceptionName = callGetter<string>(domExceptionName, value);
+  if (isIntrinsicInstance(value, domExceptionConstructor) || exceptionName !== undefined) {
+    const name = exceptionName ?? "DOMException";
+    const message = callGetter<string>(domExceptionMessage, value) ?? "";
+    return {
+      type: "object",
+      subtype: "error",
+      className: "DOMException",
+      description:
+        callMethod<string>(domExceptionToString, value) ??
+        `${name}${message ? `: ${message}` : ""}`,
+    };
+  }
+  if (isErrorObject(value)) {
+    const name = constructorName(value, "Error");
+    const stack = dataProperty(value, "stack");
+    const message = dataProperty(value, "message");
+    return {
+      type: "object",
+      subtype: "error",
+      className: name,
+      description:
+        typeof stack === "string" && stack
+          ? stack
+          : `${name}${typeof message === "string" && message ? `: ${message}` : ""}`,
+    };
+  }
+  if (isIntrinsicInstance(value, promiseConstructor) || hasNativeConstructor(value, "Promise")) {
+    return {
+      type: "object",
+      subtype: "promise",
+      className: "Promise",
+      description: "Promise",
+    };
+  }
+  for (const [name, constructor, toString] of trustedTypes) {
+    if (!isIntrinsicInstance(value, constructor) && !hasNativeConstructor(value, name)) {
+      continue;
+    }
+    return {
+      type: "object",
+      subtype: "trustedtype",
+      className: name,
+      description: callMethod<string>(toString, value) ?? name,
+    };
+  }
+
+  const byteLength = callGetter<number>(arrayBufferByteLength, value);
+  if (byteLength !== undefined) {
+    return {
+      type: "object",
+      subtype: "arraybuffer",
+      className: "ArrayBuffer",
+      description: `ArrayBuffer(${byteLength})`,
+    };
+  }
+  const sharedByteLength = callGetter<number>(sharedArrayBufferByteLength, value);
+  if (sharedByteLength !== undefined) {
+    return {
+      type: "object",
+      subtype: "arraybuffer",
+      className: "SharedArrayBuffer",
+      description: `SharedArrayBuffer(${sharedByteLength})`,
+    };
+  }
+
+  const name = className(value, "Object");
+  return { type: "object", className: name, description: name };
 }
 
 function isArrayIndex(name: PropertyKey): boolean {
@@ -220,11 +484,50 @@ function parseUnserializable(value: string): number | bigint {
   throw new Error("Invalid unserializable value");
 }
 
+function protocolValue(value: unknown, depth = 1_000): unknown {
+  if (depth <= 0) throw new Error(REFERENCE_CHAIN_TOO_LONG);
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (
+    typeof value !== "object" &&
+    typeof value !== "function" &&
+    !(typeof value === "undefined" && value !== undefined)
+  ) {
+    throw new Error(CANNOT_RETURN_BY_VALUE);
+  }
+  if (Array.isArray(value)) {
+    return Array.from({ length: value.length }, (_, index) =>
+      protocolValue(value[index], depth - 1),
+    );
+  }
+  const result: Record<string, unknown> = Object.create(null);
+  let names: string[];
+  try {
+    names = Object.keys(value);
+  } catch (cause) {
+    throw Object.assign(new Error("Internal error", { cause }), { code: -32603 });
+  }
+  for (const name of names) {
+    let property: unknown;
+    try {
+      property = Reflect.get(value, name) as unknown;
+    } catch (cause) {
+      throw Object.assign(new Error("Internal error", { cause }), { code: -32603 });
+    }
+    if (property !== undefined) {
+      result[name] = protocolValue(property, depth - 1);
+    }
+  }
+  return result;
+}
+
 export class RemoteObjectStore {
-  private readonly scope = createScope();
   private nextObjectId = 1;
   private readonly objects = new Map<string, StoredObject>();
   private readonly objectGroups = new Map<string, Set<string>>();
+
+  constructor(private readonly scope = createScope()) {}
 
   wrap(value: unknown, options: WrapOptions = {}): Protocol.Runtime.RemoteObject {
     if (value === undefined) {
@@ -251,28 +554,8 @@ export class RemoteObjectStore {
     }
 
     if (options.returnByValue) {
-      if (type === "symbol") {
-        throw new Error(CANNOT_RETURN_BY_VALUE);
-      }
-
       const reference = describeReference(value as object | CallableFunction);
-      const serializable = type === "function" ? { ...value } : value;
-      let serialized: string | undefined;
-      try {
-        serialized = JSON.stringify(serializable);
-      } catch (error) {
-        const message = error instanceof Error ? error.message.toLowerCase() : "";
-        throw new Error(
-          message.includes("circular") || message.includes("cyclic")
-            ? REFERENCE_CHAIN_TOO_LONG
-            : CANNOT_RETURN_BY_VALUE,
-          { cause: error },
-        );
-      }
-      if (serialized === undefined) {
-        throw new Error(CANNOT_RETURN_BY_VALUE);
-      }
-      return { type: reference.type, value: JSON.parse(serialized) as unknown };
+      return { type: reference.type, value: protocolValue(value) };
     }
 
     const objectId = this.bind(value, options.objectGroup);
@@ -288,11 +571,11 @@ export class RemoteObjectStore {
   }
 
   releaseObject(objectId: string): void {
-    const entry = this.find(objectId);
-    this.objects.delete(objectId);
+    const { canonicalId, entry } = this.lookup(objectId);
+    this.objects.delete(canonicalId);
     if (entry.objectGroup) {
       const group = this.objectGroups.get(entry.objectGroup);
-      group?.delete(objectId);
+      group?.delete(canonicalId);
       if (group?.size === 0) {
         this.objectGroups.delete(entry.objectGroup);
       }
@@ -323,7 +606,7 @@ export class RemoteObjectStore {
   }
 
   private bind(value: unknown, objectGroup?: string): string {
-    const objectId = `${this.scope}:${this.nextObjectId++}`;
+    const objectId = `${this.scope}.${this.nextObjectId++}`;
     const entry: StoredObject = objectGroup ? { value, objectGroup } : { value };
     this.objects.set(objectId, entry);
     if (objectGroup) {
@@ -338,11 +621,18 @@ export class RemoteObjectStore {
   }
 
   private find(objectId: string): StoredObject {
-    const entry = this.objects.get(objectId);
+    return this.lookup(objectId).entry;
+  }
+
+  private lookup(objectId: string): { canonicalId: string; entry: StoredObject } {
+    const parsed = parseRemoteObjectId(objectId);
+    if (!parsed) throw new Error(INVALID_OBJECT_ID);
+    if (parsed.scope !== this.scope) throw new Error(MISSING_CONTEXT);
+    const entry = this.objects.get(parsed.canonicalId);
     if (!entry) {
       throw new Error(MISSING_OBJECT);
     }
-    return entry;
+    return { canonicalId: parsed.canonicalId, entry };
   }
 
   getProperties(

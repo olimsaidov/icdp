@@ -10,7 +10,7 @@ The protocol entry point exports the small contracts used at each boundary.
 
 | Constant | Value | Meaning |
 | --- | ---: | --- |
-| `PROTOCOL_VERSION` | `4` | ICDP handshake and bridge version. |
+| `PROTOCOL_VERSION` | `5` | ICDP handshake and bridge version. |
 | `CDP_SERVER_ERROR` | `-32000` | Runtime/server failure. |
 | `CDP_SESSION_NOT_FOUND` | `-32001` | Unknown flattened `sessionId`. |
 | `CDP_PARSE_ERROR` | `-32700` | Malformed JSON. |
@@ -86,12 +86,19 @@ type FrameToHostMessage =
       sessionId: string;
       method: string;
       params: Record<string, unknown>;
+    }
+  | {
+      kind: "metadata";
+      info: FrameInfo;
     };
 ```
 
 The `attach` state lets a replacement document restore only the domains that
 the same Session had successfully enabled, together with accepted enable-time
 parameters such as `DOM.includeWhitespace`.
+The Frame sends `metadata` whenever its title or URL changes so Target
+discovery, `Target.getTargetInfo`, and `/json/list` stay synchronized with the
+live document.
 
 ## Host–Relay messages
 

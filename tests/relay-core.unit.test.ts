@@ -46,7 +46,7 @@ function readyHost(
     host,
     JSON.stringify({
       kind: "ready",
-      v: 4,
+      v: 5,
       instanceId,
       targets,
     } satisfies HostToRelayMessage),
@@ -214,7 +214,7 @@ describe("Client transport", () => {
       nextHost,
       JSON.stringify({
         kind: "ready",
-        v: 4,
+        v: 5,
         instanceId: "host-2",
         targets: [],
       } satisfies HostToRelayMessage),
@@ -241,7 +241,7 @@ describe("Client transport", () => {
     core.hostConnected(contender);
     core.hostMessage(
       contender,
-      JSON.stringify({ kind: "ready", v: 5, instanceId: "future", targets: [] }),
+      JSON.stringify({ kind: "ready", v: 6, instanceId: "future", targets: [] }),
     );
     core.clientMessage(client, JSON.stringify({ id: 1, method: "Browser.getVersion" }));
 
@@ -306,7 +306,7 @@ describe("Client transport", () => {
     core.hostConnected(host);
     core.hostMessage(
       host,
-      JSON.stringify({ kind: "ready", v: 5, instanceId: "future", targets: [] }),
+      JSON.stringify({ kind: "ready", v: 6, instanceId: "future", targets: [] }),
     );
 
     expect(host.closed).toEqual({ code: 1002, reason: "Incompatible host protocol" });

@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
 
 export type CdpId = number;
 
@@ -109,8 +109,13 @@ export type FrameEvent = {
   params: Record<string, unknown>;
 };
 
+export type FrameMetadata = {
+  kind: "metadata";
+  info: FrameInfo;
+};
+
 export type HostToFrameMessage = FrameAttach | FrameDetach | FrameCommand;
-export type FrameToHostMessage = FrameResponse | FrameEvent;
+export type FrameToHostMessage = FrameResponse | FrameEvent | FrameMetadata;
 
 // ---------------------------------------------------------------------------
 // Host <-> Relay bridge protocol (WebSocket, JSON frames)

@@ -708,12 +708,17 @@ export class NetworkObserver {
             headers?: HeadersInit;
             method?: string;
             referrerPolicy?: ReferrerPolicy;
+            signal?: AbortSignal;
             url?: string;
           })
         : undefined;
     const rawUrl = inputRecord?.url ?? String(input);
     const url = new URL(rawUrl, this.window.location.href);
     if (url.searchParams.get(INTERNAL_QUERY_PARAMETER) === "true") {
+      return Reflect.apply(original, receiver, args);
+    }
+    const effectiveSignal = init?.signal !== undefined ? init.signal : inputRecord?.signal;
+    if (effectiveSignal?.aborted) {
       return Reflect.apply(original, receiver, args);
     }
     const fragment = url.hash;
@@ -967,12 +972,14 @@ export class NetworkObserver {
     base64Encoded = false,
   ): void {
     if (!this.installed) return;
-    this.publish("Network.dataReceived", {
-      requestId,
-      timestamp: this.monotonicTime(),
-      dataLength: bytes,
-      encodedDataLength: bytes,
-    } satisfies Protocol.Network.DataReceivedEvent);
+    if (bytes > 0) {
+      this.publish("Network.dataReceived", {
+        requestId,
+        timestamp: this.monotonicTime(),
+        dataLength: bytes,
+        encodedDataLength: bytes,
+      } satisfies Protocol.Network.DataReceivedEvent);
+    }
     if (body !== undefined) this.rememberBody(requestId, body, bytes, base64Encoded);
     this.publish("Network.loadingFinished", {
       requestId,

@@ -1,3 +1,5 @@
+import { runInNewContext } from "node:vm";
+
 import { expect, test } from "vitest";
 
 import { RemoteObjectStore } from "../src/frame/cdp/remote-objects.ts";
@@ -7,9 +9,10 @@ import { RemoteObjectStore } from "../src/frame/cdp/remote-objects.ts";
 // remote-object-id-cross-process.js
 // Chromium rejects a handle after its owning execution context disappears. Store
 // instances model that context boundary without depending on Chromium itself.
-test("creates opaque handles that another store cannot resolve", () => {
-  const owner = new RemoteObjectStore();
-  const foreign = new RemoteObjectStore();
+test("scopes opaque handles to an execution context and stores them per Session", () => {
+  const owner = new RemoteObjectStore("10.20");
+  const sameContext = new RemoteObjectStore("10.20");
+  const foreignContext = new RemoteObjectStore("30.40");
   const value = { answer: 42 };
 
   const remote = owner.wrap(value);
@@ -19,10 +22,33 @@ test("creates opaque handles that another store cannot resolve", () => {
     className: "Object",
     description: "Object",
   });
-  expect(remote.objectId).toEqual(expect.any(String));
+  expect(remote.objectId).toBe("10.20.1");
   expect(remote.objectId).not.toContain("answer");
   expect(owner.resolve(remote.objectId!)).toBe(value);
-  expect(() => foreign.resolve(remote.objectId!)).toThrow("Could not find object with given id");
+  expect(owner.resolve("+10.+20.+1")).toBe(value);
+  expect(() => sameContext.resolve(remote.objectId!)).toThrow(
+    "Could not find object with given id",
+  );
+  expect(() => foreignContext.resolve(remote.objectId!)).toThrow(
+    "Cannot find context with specified id",
+  );
+
+  const sameContextRemote = sameContext.wrap({ answer: 7 });
+  expect(sameContextRemote.objectId).toBe(remote.objectId);
+  expect(sameContext.resolve(remote.objectId!)).toEqual({ answer: 7 });
+
+  expect(() => owner.resolve(remote.objectId!.replace(/\d+$/, "0"))).toThrow(
+    "Could not find object with given id",
+  );
+  expect(() => owner.resolve("10.20.-1")).toThrow("Could not find object with given id");
+  expect(() => owner.resolve("10.20.9223372036854775808")).toThrow("Invalid remote object id");
+  expect(() => owner.resolve("10.2147483648.1")).toThrow("Invalid remote object id");
+  expect(() => owner.resolve("10.20.-2147483649")).toThrow("Invalid remote object id");
+  expect(() => owner.resolve("bad:1")).toThrow("Invalid remote object id");
+
+  const releasable = owner.wrap({ releasable: true });
+  owner.releaseObject("+10.+20.+2");
+  expect(() => owner.resolve(releasable.objectId!)).toThrow("Could not find object with given id");
 });
 
 // Ported from V8's Chromium inspector coverage:
@@ -109,6 +135,45 @@ test("classifies reference values with Chromium-compatible type metadata", () =>
   });
 });
 
+test("classifies Symbol.toStringTag without invoking or trusting page accessors", () => {
+  const store = new RemoteObjectStore();
+  let getterCalls = 0;
+  const accessorTag = Object.defineProperty({}, Symbol.toStringTag, {
+    get() {
+      getterCalls += 1;
+      return "Map";
+    },
+  });
+
+  expect(store.wrap(accessorTag)).toMatchObject({
+    type: "object",
+    className: "Object",
+    description: "Object",
+  });
+  expect(getterCalls).toBe(0);
+
+  for (const tag of ["Map", "Date", "NodeList", "TrustedHTML", "Error", "Promise"]) {
+    const spoofed = Object.defineProperty({}, Symbol.toStringTag, { value: tag });
+    const remote = store.wrap(spoofed);
+    expect(remote).toMatchObject({
+      type: "object",
+      className: tag,
+      description: tag,
+    });
+    expect(remote).not.toHaveProperty("subtype");
+  }
+
+  const spoofedError = Object.defineProperty(new TypeError("bad input"), Symbol.toStringTag, {
+    value: "Map",
+  });
+  expect(store.wrap(spoofedError)).toMatchObject({
+    type: "object",
+    subtype: "error",
+    className: "TypeError",
+    description: expect.stringContaining("TypeError: bad input"),
+  });
+});
+
 // Further cases ported from v8/test/inspector/runtime/remote-object.js.
 test("reports Chromium subtypes and constructor names for built-in references", () => {
   class Widget {
@@ -168,6 +233,27 @@ test("reports Chromium subtypes and constructor names for built-in references", 
   });
 });
 
+test("recognizes branded values created in another JavaScript realm", () => {
+  const store = new RemoteObjectStore();
+  const crossRealm = runInNewContext(`({
+    error: new TypeError("cross-realm"),
+    promise: Promise.resolve(42)
+  })`) as { error: TypeError; promise: Promise<number> };
+
+  expect(store.wrap(crossRealm.error)).toMatchObject({
+    type: "object",
+    subtype: "error",
+    className: "TypeError",
+    description: expect.stringContaining("TypeError: cross-realm"),
+  });
+  expect(store.wrap(crossRealm.promise)).toMatchObject({
+    type: "object",
+    subtype: "promise",
+    className: "Promise",
+    description: "Promise",
+  });
+});
+
 // Ported from Chromium's runtime-evaluate-return-by-value.js and the broader
 // v8/test/inspector/runtime/remote-object.js return-by-value matrix.
 test("returns JSON values by value and reports Chromium's serialization failures", () => {
@@ -200,6 +286,20 @@ test("returns JSON values by value and reports Chromium's serialization failures
   expect(() => store.wrap(cyclic, { returnByValue: true })).toThrow(
     "Object reference chain is too long",
   );
+
+  let getterCalls = 0;
+  const getterCycle: { readonly self?: unknown } = {};
+  Object.defineProperty(getterCycle, "self", {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return getterCycle;
+    },
+  });
+  expect(() => store.wrap(getterCycle, { returnByValue: true })).toThrow(
+    "Object reference chain is too long",
+  );
+  expect(getterCalls).toBe(1_000);
 });
 
 // Ported from v8/test/inspector/runtime/remote-object-get-properties.js.
@@ -338,7 +438,9 @@ test("decodes protocol call arguments and rejects foreign or released handles", 
   expect(owner.decodeArgument({ unserializableValue: "-0x10n" })).toBe(-16n);
   expect(owner.decodeArgument({ objectId })).toBe(value);
 
-  expect(() => foreign.decodeArgument({ objectId })).toThrow("Could not find object with given id");
+  expect(() => foreign.decodeArgument({ objectId })).toThrow(
+    "Cannot find context with specified id",
+  );
   owner.releaseObject(objectId);
   expect(() => owner.decodeArgument({ objectId })).toThrow("Could not find object with given id");
   expect(() => owner.decodeArgument({ unserializableValue: "not-a-number" })).toThrow(

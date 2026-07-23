@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import { type FrameElementLike, IcdpHost, type WindowLike } from "../src/host/index.ts";
 import type { CdpMessage } from "../src/protocol.ts";
@@ -90,34 +90,33 @@ class TestClient {
 describe("relay + host + frame, end to end", () => {
   let relay: RelayServer;
   let framePort: MessagePort;
-  const frameMessages: Array<{
+  let frameMessages: Array<{
     kind: "attach" | "detach" | "command";
     sessionId: string;
     id?: number;
     method?: string;
   }> = [];
-  const { win, emit } = fakeWindow();
-  const host = new IcdpHost({
-    window: win,
-    product: "icdp-e2e",
-    onCloseTarget: () => {},
-  });
-  const frame = fakeIframe();
-  const cleanups: Array<() => unknown> = [() => host.destroy()];
+  let emit: ReturnType<typeof fakeWindow>["emit"];
+  let host: IcdpHost;
+  let frame: ReturnType<typeof fakeIframe>;
+  let cleanups: Array<() => unknown>;
 
-  beforeAll(async () => {
+  beforeEach(async () => {
+    const fake = fakeWindow();
+    emit = fake.emit;
+    host = new IcdpHost({
+      window: fake.win,
+      product: "icdp-e2e",
+      onCloseTarget: () => {},
+    });
+    frame = fakeIframe();
+    frameMessages = [];
+    cleanups = [() => host.destroy()];
     relay = await serveRelay({ product: "icdp-e2e" });
     cleanups.push(() => relay.stop());
-  });
-
-  afterAll(async () => {
-    for (const cleanup of cleanups.toReversed()) await cleanup();
-  });
-
-  test("full command round-trip from a WebSocket client to the frame", async () => {
     host.pair(frame.iframe, { targetId: "preview", origins: [FRAME_ORIGIN] });
     emit({
-      data: { icdp: "hello", v: 4, title: "App", url: `${FRAME_ORIGIN}/` },
+      data: { icdp: "hello", v: 5, title: "App", url: `${FRAME_ORIGIN}/` },
       origin: FRAME_ORIGIN,
       source: frame.contentWindow,
     });
@@ -162,7 +161,13 @@ describe("relay + host + frame, end to end", () => {
       () => relay.core.status().hostConnected && relay.core.status().targets.length === 1,
       "host uplink",
     );
+  });
 
+  afterEach(async () => {
+    for (const cleanup of cleanups.toReversed()) await cleanup();
+  });
+
+  test("full command round-trip from a WebSocket client to the frame", async () => {
     const client = new TestClient(relay.browserWsUrl);
     cleanups.push(() => client.close());
 

@@ -24,7 +24,7 @@ test("the frame agent re-announces and dispatches session-scoped CDP commands", 
       icdp: "hello",
       title: "Restored app",
       url: location.href,
-      v: 4,
+      v: 5,
     },
     "https://host.test",
   );
@@ -34,15 +34,21 @@ test("the frame agent re-announces and dispatches session-scoped CDP commands", 
     onmessage: null,
     postMessage: vi.fn(),
   } as unknown as MessagePort;
+  document.title = "Changed before welcome";
   window.dispatchEvent(
     new MessageEvent("message", {
-      data: { icdp: "welcome", v: 4 },
+      data: { icdp: "welcome", v: 5 },
       origin: "https://host.test",
       ports: [framePort],
       source: parent as unknown as WindowProxy,
     }),
   );
-  expect(framePort.postMessage).not.toHaveBeenCalled();
+  expect(framePort.postMessage).toHaveBeenCalledOnce();
+  expect(JSON.parse(String(vi.mocked(framePort.postMessage).mock.calls[0]?.[0]))).toEqual({
+    kind: "metadata",
+    info: { title: "Changed before welcome", url: location.href },
+  });
+  vi.mocked(framePort.postMessage).mockClear();
 
   framePort.onmessage?.(
     new MessageEvent("message", {
@@ -106,7 +112,7 @@ test("the frame agent re-announces and dispatches session-scoped CDP commands", 
   } as unknown as MessagePort;
   window.dispatchEvent(
     new MessageEvent("message", {
-      data: { icdp: "welcome", v: 4 },
+      data: { icdp: "welcome", v: 5 },
       origin: "https://host.test",
       ports: [replacementPort],
       source: parent as unknown as WindowProxy,

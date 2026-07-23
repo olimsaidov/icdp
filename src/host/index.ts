@@ -1,4 +1,9 @@
-import { parseCdpCommand, validateCdpParams, type CdpParamSchema } from "../cdp-dispatch.ts";
+import {
+  invalidNestedCdpParam,
+  parseCdpCommand,
+  validateCdpParams,
+  type CdpParamSchema,
+} from "../cdp-dispatch.ts";
 import {
   CDP_INVALID_PARAMS,
   CDP_METHOD_NOT_FOUND,
@@ -98,6 +103,8 @@ type RelayClientState = {
   id: string;
   directTargetId?: string;
   directSessionId?: string;
+  /** Synthetic browser Target owned by a browser-endpoint connection. */
+  browserTargetId?: string;
   rootTargetAgent: TargetAgentState;
   sessions: Set<string>;
 };
@@ -143,7 +150,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isFrameToHostMessage(value: unknown): value is FrameToHostMessage {
-  if (!isRecord(value) || typeof value.sessionId !== "string") return false;
+  if (!isRecord(value)) return false;
+  if (value.kind === "metadata") {
+    return (
+      isRecord(value.info) &&
+      typeof value.info.title === "string" &&
+      typeof value.info.url === "string"
+    );
+  }
+  if (typeof value.sessionId !== "string") return false;
   if (value.kind === "event") {
     return typeof value.method === "string" && isRecord(value.params);
   }
@@ -248,6 +263,60 @@ function isRemoteLocation(value: unknown): boolean {
   );
 }
 
+function nestedTargetParamError(method: string, params: Record<string, unknown>, name: string) {
+  if (method === "Target.setRemoteLocations" && name === "locations") {
+    for (const [index, location] of (params.locations as unknown[]).entries()) {
+      if (!isRecord(location)) {
+        return invalidNestedCdpParam(params, ["locations", index], "object", {
+          expectation: "CBOR: map start expected",
+        });
+      }
+      if (!Object.prototype.hasOwnProperty.call(location, "host")) {
+        return invalidNestedCdpParam(params, ["locations", index, "host"], "string", {
+          missing: true,
+        });
+      }
+      if (typeof location.host !== "string") {
+        return invalidNestedCdpParam(params, ["locations", index, "host"], "string");
+      }
+      if (!Object.prototype.hasOwnProperty.call(location, "port")) {
+        return invalidNestedCdpParam(params, ["locations", index, "port"], "integer", {
+          missing: true,
+        });
+      }
+      if (
+        !Number.isInteger(location.port) ||
+        Number(location.port) < -2_147_483_648 ||
+        Number(location.port) > 2_147_483_647
+      ) {
+        return invalidNestedCdpParam(params, ["locations", index, "port"], "integer");
+      }
+    }
+  }
+
+  if (
+    name !== "filter" ||
+    (method !== "Target.getTargets" &&
+      method !== "Target.setDiscoverTargets" &&
+      method !== "Target.setAutoAttach")
+  ) {
+    return;
+  }
+  for (const [index, entry] of (params.filter as unknown[]).entries()) {
+    if (!isRecord(entry)) {
+      return invalidNestedCdpParam(params, ["filter", index], "object", {
+        expectation: "CBOR: map start expected",
+      });
+    }
+    if (entry.exclude !== undefined && typeof entry.exclude !== "boolean") {
+      return invalidNestedCdpParam(params, ["filter", index, "exclude"], "boolean");
+    }
+    if (entry.type !== undefined && typeof entry.type !== "string") {
+      return invalidNestedCdpParam(params, ["filter", index, "type"], "string");
+    }
+  }
+}
+
 /** Params of a CDP Target.createTarget request handed to onCreateTarget. */
 export type CreateTargetParams = {
   url: string;
@@ -294,7 +363,6 @@ export class IcdpHost {
   private readonly win: WindowLike;
   private readonly options: IcdpHostOptions;
   private readonly instanceId = `icdp-host-${uniqueInstanceId()}`;
-  private readonly browserTargetId = `icdp-browser-${uniqueInstanceId()}`;
   private readonly onWindowMessage = (event: MessageEvent) => this.handleWindowMessage(event);
 
   constructor(optionsOrWindow: IcdpHostOptions | WindowLike = {}) {
@@ -422,7 +490,13 @@ export class IcdpHost {
     const current = new Set(clientIds);
     for (const [clientId, client] of this.relayClients) {
       if (current.has(clientId)) continue;
+      if (client.browserTargetId) {
+        this.emitBrowserTargetInfoChanged(client.browserTargetId, false);
+      }
       for (const sessionId of Array.from(client.sessions)) this.endSession(sessionId);
+      if (client.browserTargetId) {
+        this.emitBrowserTargetDestroyed(client.browserTargetId);
+      }
       this.relayClients.delete(clientId);
     }
     for (const clientId of current) {
@@ -430,16 +504,26 @@ export class IcdpHost {
       const existing = this.relayClients.get(clientId);
       if (existing && existing.directTargetId === directTargetId) continue;
       if (existing) {
+        if (existing.browserTargetId) {
+          this.emitBrowserTargetInfoChanged(existing.browserTargetId, false);
+        }
         for (const sessionId of Array.from(existing.sessions)) this.endSession(sessionId);
+        if (existing.browserTargetId) {
+          this.emitBrowserTargetDestroyed(existing.browserTargetId);
+        }
         this.relayClients.delete(clientId);
       }
+      const browserTargetId = directTargetId === undefined ? uniqueInstanceId() : undefined;
+      if (browserTargetId) this.emitBrowserTargetCreated(browserTargetId);
       const client: RelayClientState = {
         id: clientId,
         ...(directTargetId === undefined ? {} : { directTargetId }),
+        ...(browserTargetId === undefined ? {} : { browserTargetId }),
         rootTargetAgent: createTargetAgent(),
         sessions: new Set(),
       };
       this.relayClients.set(clientId, client);
+      if (browserTargetId) this.emitBrowserTargetInfoChanged(browserTargetId, true);
       if (directTargetId !== undefined && this.pairings.has(directTargetId)) {
         const session = this.attachRelayClient(client, directTargetId, {
           notify: false,
@@ -525,12 +609,17 @@ export class IcdpHost {
     if (session && message.method === "Target.getTargetInfo") {
       const schemaError = validateCdpParams(params, BROWSER_PARAM_SCHEMAS[message.method]);
       if (schemaError) {
-        reject(schemaError.code, schemaError.message);
+        reject(schemaError.code, schemaError.message, schemaError.data);
         return;
       }
       const targetId = (params.targetId as string | undefined) ?? targetAgent.targetId;
       if (targetId === undefined) {
-        respond({ targetInfo: this.browserTargetInfo() });
+        const targetInfo = this.browserTargetInfoForClient(client);
+        if (!targetInfo) {
+          reject(CDP_INVALID_PARAMS, "No target with given id found");
+          return;
+        }
+        respond({ targetInfo });
         return;
       }
       const targetInfo = this.targetInfoForId(targetId);
@@ -554,9 +643,11 @@ export class IcdpHost {
       return;
     }
 
-    const schemaError = validateCdpParams(params, BROWSER_PARAM_SCHEMAS[message.method]);
+    const schemaError = validateCdpParams(params, BROWSER_PARAM_SCHEMAS[message.method], (name) =>
+      nestedTargetParamError(message.method, params, name),
+    );
     if (schemaError) {
-      reject(schemaError.code, schemaError.message);
+      reject(schemaError.code, schemaError.message, schemaError.data);
       return;
     }
     if (
@@ -586,9 +677,6 @@ export class IcdpHost {
       const targetInfos = this.targets()
         .filter(() => matchesTargetFilter(activeFilter))
         .map((target) => this.targetInfo(target));
-      if (matchesTargetFilter(activeFilter, "browser")) {
-        targetInfos.unshift(this.browserTargetInfo());
-      }
       respond({
         targetInfos,
       });
@@ -597,7 +685,9 @@ export class IcdpHost {
     if (message.method === "Target.getTargetInfo") {
       const targetId = (params.targetId as string | undefined) ?? targetAgent.targetId;
       const targetInfo =
-        targetId === undefined ? this.browserTargetInfo() : this.targetInfoForId(targetId);
+        targetId === undefined
+          ? this.browserTargetInfoForClient(client)
+          : this.targetInfoForId(targetId);
       if (!targetInfo) {
         reject(CDP_INVALID_PARAMS, "No target with given id found");
         return;
@@ -614,7 +704,27 @@ export class IcdpHost {
       targetAgent.discoverFilter = targetAgent.discoverTargets ? filter : undefined;
       if (targetAgent.discoverTargets) {
         if (matchesTargetFilter(targetAgent.discoverFilter, "browser")) {
-          this.reportTargetInfoCreated(client, targetAgent, this.browserTargetInfo());
+          const ownBrowserTargetId = client.browserTargetId;
+          if (ownBrowserTargetId) {
+            this.reportTargetInfoCreated(
+              client,
+              targetAgent,
+              this.browserTargetInfo(ownBrowserTargetId),
+            );
+          }
+          for (const candidate of this.relayClients.values()) {
+            if (
+              candidate.browserTargetId === undefined ||
+              candidate.browserTargetId === ownBrowserTargetId
+            ) {
+              continue;
+            }
+            this.reportTargetInfoCreated(
+              client,
+              targetAgent,
+              this.browserTargetInfo(candidate.browserTargetId),
+            );
+          }
         }
         for (const target of this.targets()) {
           this.reportTargetCreated(client, targetAgent, target);
@@ -873,19 +983,65 @@ export class IcdpHost {
     };
   }
 
-  private browserTargetInfo(): Record<string, unknown> {
+  private browserTargetInfo(targetId: string, attached = true): Record<string, unknown> {
     return {
-      targetId: this.browserTargetId,
+      targetId,
       type: "browser",
       title: "",
       url: "",
-      attached: true,
+      attached,
       canAccessOpener: false,
     };
   }
 
+  private browserTargetInfoForClient(
+    client: RelayClientState,
+  ): Record<string, unknown> | undefined {
+    return client.browserTargetId === undefined
+      ? undefined
+      : this.browserTargetInfo(client.browserTargetId);
+  }
+
+  private emitBrowserTargetCreated(targetId: string): void {
+    const targetInfo = this.browserTargetInfo(targetId, false);
+    for (const client of this.relayClients.values()) {
+      for (const agent of this.targetAgents(client)) {
+        if (agent.discoverTargets && matchesTargetFilter(agent.discoverFilter, "browser")) {
+          this.reportTargetInfoCreated(client, agent, targetInfo);
+        }
+      }
+    }
+  }
+
+  private emitBrowserTargetInfoChanged(targetId: string, attached: boolean): void {
+    const targetInfo = this.browserTargetInfo(targetId, attached);
+    for (const client of this.relayClients.values()) {
+      for (const agent of this.targetAgents(client)) {
+        if (!agent.reportedTargets.has(targetId)) continue;
+        this.sendTargetAgentEvent(client, agent, {
+          method: "Target.targetInfoChanged",
+          params: { targetInfo },
+        });
+      }
+    }
+  }
+
+  private emitBrowserTargetDestroyed(targetId: string): void {
+    for (const client of this.relayClients.values()) {
+      for (const agent of this.targetAgents(client)) {
+        if (!agent.reportedTargets.delete(targetId)) continue;
+        this.sendTargetAgentEvent(client, agent, {
+          method: "Target.targetDestroyed",
+          params: { targetId },
+        });
+      }
+    }
+  }
+
   private targetInfoForId(targetId: string): Record<string, unknown> | undefined {
-    if (targetId === this.browserTargetId) return this.browserTargetInfo();
+    for (const client of this.relayClients.values()) {
+      if (client.browserTargetId === targetId) return this.browserTargetInfo(targetId);
+    }
     const pairing = this.pairings.get(targetId);
     return pairing ? this.targetInfo(this.summary(pairing)) : undefined;
   }
@@ -1310,22 +1466,35 @@ export class IcdpHost {
     for (const listener of this.targetListeners) listener(event);
     for (const client of this.relayClients.values()) {
       for (const agent of this.targetAgents(client)) {
-        if (agent.discoverTargets) {
-          if (event.kind === "targetCreated") {
-            this.reportTargetCreated(client, agent, event.target);
-          } else if (event.kind === "targetDestroyed") {
-            if (agent.reportedTargets.delete(event.targetId)) {
-              this.sendTargetAgentEvent(client, agent, {
-                method: "Target.targetDestroyed",
-                params: { targetId: event.targetId },
-              });
-            }
-          } else if (agent.reportedTargets.has(event.target.targetId)) {
+        if (event.kind === "targetInfoChanged") {
+          const autoAttached = Array.from(client.sessions).some((sessionId) => {
+            const session = this.sessions.get(sessionId);
+            return (
+              session?.targetId === event.target.targetId &&
+              session.autoAttached &&
+              session.parentAgentSessionId === agent.ownerSessionId
+            );
+          });
+          if (
+            (agent.discoverTargets && agent.reportedTargets.has(event.target.targetId)) ||
+            autoAttached
+          ) {
             this.sendTargetAgentEvent(client, agent, {
               method: "Target.targetInfoChanged",
               params: { targetInfo: this.targetInfo(event.target) },
             });
           }
+        } else if (agent.discoverTargets && event.kind === "targetCreated") {
+          this.reportTargetCreated(client, agent, event.target);
+        } else if (
+          event.kind === "targetDestroyed" &&
+          agent.discoverTargets &&
+          agent.reportedTargets.delete(event.targetId)
+        ) {
+          this.sendTargetAgentEvent(client, agent, {
+            method: "Target.targetDestroyed",
+            params: { targetId: event.targetId },
+          });
         }
       }
     }
@@ -1396,6 +1565,15 @@ export class IcdpHost {
   private handleFrameMessage(pairing: Pairing, raw: string): void {
     const message = parseJson<unknown>(raw);
     if (!isFrameToHostMessage(message)) return;
+
+    if (message.kind === "metadata") {
+      if (message.info.title === pairing.info.title && message.info.url === pairing.info.url) {
+        return;
+      }
+      pairing.info = message.info;
+      this.emitTargetEvent({ kind: "targetInfoChanged", target: this.summary(pairing) });
+      return;
+    }
 
     if (message.kind === "response") {
       const call = pairing.pending.get(message.id);

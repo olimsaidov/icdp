@@ -1,4 +1,5 @@
 import {
+  type FrameInfo,
   type HandshakeMessage,
   type HostToFrameMessage,
   isHandshakeMessage,
@@ -21,9 +22,41 @@ let started = false;
 let port: MessagePort | null = null;
 let backend: FrameBackend | null = null;
 let consoleBridgeInstalled = false;
+let reportedInfo: FrameInfo | undefined;
 
 function sendToHost(message: unknown): void {
   port?.postMessage(JSON.stringify(message));
+}
+
+function currentInfo(): FrameInfo {
+  return {
+    title: document.title || location.href,
+    url: location.href,
+  };
+}
+
+function reportInfo(): void {
+  if (!port) return;
+  const info = currentInfo();
+  if (info.title === reportedInfo?.title && info.url === reportedInfo.url) return;
+  reportedInfo = info;
+  sendToHost({ kind: "metadata", info });
+}
+
+function observeMetadata(): void {
+  const navigation = (
+    window as Window & {
+      navigation?: EventTarget;
+    }
+  ).navigation;
+  navigation?.addEventListener("navigatesuccess", reportInfo);
+  window.addEventListener("hashchange", reportInfo);
+  window.addEventListener("popstate", reportInfo);
+  new MutationObserver(reportInfo).observe(document.head, {
+    childList: true,
+    characterData: true,
+    subtree: true,
+  });
 }
 
 function frameBackend(): FrameBackend {
@@ -67,6 +100,7 @@ function adoptPort(next: MessagePort): void {
     void handleFrameMessage(event.data);
   };
   next.start?.();
+  reportInfo();
 }
 
 function installConsoleBridge(): void {
@@ -109,11 +143,12 @@ function parentAllowed(origin: string, allowed: string[] | "*"): boolean {
 }
 
 function announce(allowed: string[] | "*"): void {
+  const info = currentInfo();
+  reportedInfo = info;
   const hello = {
     icdp: "hello",
     v: PROTOCOL_VERSION,
-    title: document.title || location.href,
-    url: location.href,
+    ...info,
   } satisfies HandshakeMessage;
   for (const origin of allowed === "*" ? ["*"] : allowed) {
     try {
@@ -130,6 +165,7 @@ export function startFrameAgent(options: FrameAgentOptions): void {
   if (started || window.parent === window) return;
   started = true;
   frameBackend();
+  observeMetadata();
   const allowed = options.allowedParents;
 
   window.addEventListener("message", (event) => {

@@ -53,6 +53,15 @@ child's `Target.detachedFromTarget`, followed by any attached-state change and
 the command response; descendant detach events and pending-command errors are
 suppressed.
 
+Each browser-endpoint connection also owns a synthetic browser Target for the
+lifetime of that connection. `Target.getTargetInfo` without a `targetId`
+returns that connection's browser Target. Browser Targets are intentionally
+absent from `Target.getTargets` (including a browser-only filter) and from the
+Relay's HTTP target list, matching Chromium. Discovery with a matching browser
+filter still reports them: existing connections are created as attached, a
+new connection emits created → attached, and disconnect emits detached →
+destroyed.
+
 An unknown Host-domain method returns `-32601`. A Frame method sent without a
 `sessionId` on the browser endpoint is rejected with a message telling the
 Client to attach first.

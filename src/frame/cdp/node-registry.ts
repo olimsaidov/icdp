@@ -58,6 +58,13 @@ export class SessionNodeRegistry {
     if (shadowRoot) {
       this.unbindSubtree(shadowRoot);
     }
+    if (node.nodeType === node.ELEMENT_NODE && (node as Element).localName === "template") {
+      this.unbindSubtree((node as HTMLTemplateElement).content);
+    }
+    this.unbindNode(node);
+  }
+
+  unbindNode(node: Node): void {
     this.childrenRequested.delete(node);
     const id = this.nodeToId.get(node);
     if (id === undefined) return;

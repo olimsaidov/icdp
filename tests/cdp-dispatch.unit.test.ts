@@ -330,6 +330,7 @@ test("parameter schemas reject missing required parameters", () => {
   expect(validateCdpParams({}, schema)).toEqual({
     code: -32602,
     message: "Invalid parameters",
+    data: "Failed to deserialize params.expression - BINDINGS: mandatory field missing at position 8",
   });
 });
 
@@ -339,6 +340,7 @@ test("parameter schemas reject values of the wrong type", () => {
   expect(validateCdpParams({ expression: 42 }, schema)).toEqual({
     code: -32602,
     message: "Invalid parameters",
+    data: "Failed to deserialize params.expression - BINDINGS: string value expected at position 19",
   });
 });
 
@@ -350,6 +352,7 @@ test("optional parameters may be omitted and are type-checked when present", () 
   expect(validateCdpParams({ includeCommandLineAPI: "true" }, schema)).toEqual({
     code: -32602,
     message: "Invalid parameters",
+    data: "Failed to deserialize params.includeCommandLineAPI - BINDINGS: bool value expected at position 30",
   });
 });
 
@@ -377,9 +380,23 @@ test("parameter schemas implement Chromium JSON value kinds and int32 integers",
   expect(validateCdpParams({ ...valid, integer: 2_147_483_648 }, schema)).toEqual({
     code: -32602,
     message: "Invalid parameters",
+    data: "Failed to deserialize params.integer - BINDINGS: int32 value expected at position 40",
   });
   expect(validateCdpParams({ ...valid, number: Number.POSITIVE_INFINITY }, schema)).toEqual({
     code: -32602,
     message: "Invalid parameters",
+    data: "Failed to deserialize params.number - BINDINGS: double value expected at position 52",
   });
+
+  const expressionSchema: CdpParamSchema = { required: { expression: "string" } };
+  for (const [prefix, position] of [
+    [2_147_483_647, 26],
+    [-2_147_483_648, 26],
+    [2_147_483_648, 30],
+    [-2_147_483_649, 30],
+  ] as const) {
+    expect(validateCdpParams({ x: prefix, expression: 42 }, expressionSchema)?.data).toBe(
+      `Failed to deserialize params.expression - BINDINGS: string value expected at position ${position}`,
+    );
+  }
 });

@@ -94,7 +94,7 @@ async function connect(
   host.pair(frame.iframe, { targetId: "preview", origins: options.origins ?? [FRAME_ORIGIN] });
 
   emit({
-    data: { icdp: "hello", v: 4, title: "App", url: `${FRAME_ORIGIN}/` },
+    data: { icdp: "hello", v: 5, title: "App", url: `${FRAME_ORIGIN}/` },
     origin: FRAME_ORIGIN,
     source: frame.contentWindow,
   });
@@ -160,7 +160,7 @@ describe("handshake", () => {
     const frame = fakeIframe();
     host.pair(frame.iframe, { targetId: "preview", origins: [FRAME_ORIGIN] });
     emit({
-      data: { icdp: "hello", v: 4, title: "Evil", url: "http://evil.test/" },
+      data: { icdp: "hello", v: 5, title: "Evil", url: "http://evil.test/" },
       origin: "http://evil.test",
       source: frame.contentWindow,
     });
@@ -175,7 +175,7 @@ describe("handshake", () => {
     const frame = fakeIframe();
     host.pair(frame.iframe, { targetId: "preview", origins: "*" });
     emit({
-      data: { icdp: "hello", v: 4, title: "X", url: "http://x.test/" },
+      data: { icdp: "hello", v: 5, title: "X", url: "http://x.test/" },
       origin: FRAME_ORIGIN,
       source: { not: "the iframe" },
     });
@@ -191,9 +191,9 @@ describe("handshake", () => {
     host.pair(frame.iframe, { targetId: "preview", origins: [FRAME_ORIGIN] });
 
     for (const data of [
-      { icdp: "hello", v: 5, title: "Future", url: `${FRAME_ORIGIN}/future` },
-      { icdp: "hello", v: 4, title: "Missing URL" },
-      { icdp: "hello", v: 4, url: `${FRAME_ORIGIN}/missing-title` },
+      { icdp: "hello", v: 6, title: "Future", url: `${FRAME_ORIGIN}/future` },
+      { icdp: "hello", v: 5, title: "Missing URL" },
+      { icdp: "hello", v: 5, url: `${FRAME_ORIGIN}/missing-title` },
     ]) {
       emit({ data, origin: FRAME_ORIGIN, source: frame.contentWindow });
     }
@@ -389,7 +389,7 @@ describe("pairing lifecycle", () => {
     await enabled;
 
     emit({
-      data: { icdp: "hello", v: 4, title: "App v2", url: `${FRAME_ORIGIN}/v2` },
+      data: { icdp: "hello", v: 5, title: "App v2", url: `${FRAME_ORIGIN}/v2` },
       origin: FRAME_ORIGIN,
       source: frame.contentWindow,
     });
@@ -425,7 +425,7 @@ describe("pairing lifecycle", () => {
     await document;
 
     emit({
-      data: { icdp: "hello", v: 4, title: "App v2", url: `${FRAME_ORIGIN}/v2` },
+      data: { icdp: "hello", v: 5, title: "App v2", url: `${FRAME_ORIGIN}/v2` },
       origin: FRAME_ORIGIN,
       source: frame.contentWindow,
     });
@@ -474,7 +474,7 @@ describe("pairing lifecycle", () => {
     await repeated;
 
     emit({
-      data: { icdp: "hello", v: 4, title: "App v2", url: `${FRAME_ORIGIN}/v2` },
+      data: { icdp: "hello", v: 5, title: "App v2", url: `${FRAME_ORIGIN}/v2` },
       origin: FRAME_ORIGIN,
       source: frame.contentWindow,
     });
@@ -504,7 +504,7 @@ describe("pairing lifecycle", () => {
     expect(received.map((message) => message.kind)).toEqual(["attach", "command"]);
 
     emit({
-      data: { icdp: "hello", v: 4, title: "App v2", url: `${FRAME_ORIGIN}/v2` },
+      data: { icdp: "hello", v: 5, title: "App v2", url: `${FRAME_ORIGIN}/v2` },
       origin: FRAME_ORIGIN,
       source: frame.contentWindow,
     });
@@ -523,7 +523,7 @@ describe("pairing lifecycle", () => {
     const session = host.attach("preview");
 
     emit({
-      data: { icdp: "hello", v: 4, title: "App v2", url: `${FRAME_ORIGIN}/v2` },
+      data: { icdp: "hello", v: 5, title: "App v2", url: `${FRAME_ORIGIN}/v2` },
       origin: FRAME_ORIGIN,
       source: frame.contentWindow,
     });
@@ -567,7 +567,7 @@ describe("pairing lifecycle", () => {
       }),
     );
     emit({
-      data: { icdp: "hello", v: 4, title: "App v2", url: `${FRAME_ORIGIN}/v2` },
+      data: { icdp: "hello", v: 5, title: "App v2", url: `${FRAME_ORIGIN}/v2` },
       origin: FRAME_ORIGIN,
       source: frame.contentWindow,
     });
@@ -638,7 +638,7 @@ describe("pairing lifecycle", () => {
     ).toHaveLength(2);
 
     emit({
-      data: { icdp: "hello", v: 4, title: "App v2", url: `${FRAME_ORIGIN}/v2` },
+      data: { icdp: "hello", v: 5, title: "App v2", url: `${FRAME_ORIGIN}/v2` },
       origin: FRAME_ORIGIN,
       source: frame.contentWindow,
     });
@@ -872,7 +872,7 @@ describe("relay uplink lifecycle", () => {
     emit({
       data: {
         icdp: "hello",
-        v: 4,
+        v: 5,
         title: "Sibling",
         url: `${FRAME_ORIGIN}/sibling`,
       },
@@ -1204,7 +1204,7 @@ describe("relay uplink lifecycle", () => {
     });
   });
 
-  test("root Target.getTargetInfo defaults to the stable browser target", async () => {
+  test("root Target.getTargetInfo defaults to the connection's browser target", async () => {
     const { host } = await connect();
     const socket = new FakeSocket();
     host.connectRelay({
@@ -1234,7 +1234,7 @@ describe("relay uplink lifecycle", () => {
       }
     )?.targetInfo;
     expect(browser).toMatchObject({
-      targetId: expect.stringMatching(/^icdp-browser-/),
+      targetId: expect.any(String),
       type: "browser",
       url: "",
       attached: true,
@@ -1251,7 +1251,7 @@ describe("relay uplink lifecycle", () => {
     ).toEqual(browser);
   });
 
-  test("browser target is enumerated only by an explicit matching filter", async () => {
+  test("browser target is discovered but never enumerated by getTargets", async () => {
     const { host } = await connect();
     const socket = new FakeSocket();
     host.connectRelay({
@@ -1302,18 +1302,14 @@ describe("relay uplink lifecycle", () => {
     const discovered = messages().filter((message) => message.method === "Target.targetCreated");
 
     expect(defaultTargets).toEqual([expect.objectContaining({ type: "page" })]);
-    expect(filteredTargets).toEqual([
-      expect.objectContaining({
-        targetId: expect.stringMatching(/^icdp-browser-/),
-        type: "browser",
-      }),
-    ]);
+    expect(filteredTargets).toEqual([]);
     expect(discovered).toEqual([
       expect.objectContaining({
         params: {
           targetInfo: expect.objectContaining({
-            targetId: filteredTargets?.[0]?.targetId,
+            targetId: expect.any(String),
             type: "browser",
+            attached: true,
           }),
         },
       }),
@@ -1543,7 +1539,7 @@ describe("relay uplink lifecycle", () => {
     emit({
       data: {
         icdp: "hello",
-        v: 4,
+        v: 5,
         title: "Sibling",
         url: `${FRAME_ORIGIN}/sibling`,
       },
@@ -2102,7 +2098,7 @@ describe("relay uplink lifecycle", () => {
       2,
     );
     expect(messages().find((message) => message.id === 8)?.result).toEqual({
-      targetInfos: [expect.objectContaining({ type: "browser" })],
+      targetInfos: [],
     });
   });
 
@@ -2549,14 +2545,42 @@ describe("relay uplink lifecycle", () => {
       },
     });
     expect(responses.slice(10, 15)).toEqual([
-      { id: 11, error: { code: -32602, message: "Invalid parameters" } },
-      { id: 12, error: { code: -32602, message: "Invalid parameters" } },
+      {
+        id: 11,
+        error: {
+          code: -32602,
+          message: "Invalid parameters",
+          data: "Failed to deserialize params.url - BINDINGS: mandatory field missing at position 8",
+        },
+      },
+      {
+        id: 12,
+        error: {
+          code: -32602,
+          message: "Invalid parameters",
+          data: "Failed to deserialize params.targetId - BINDINGS: string value expected at position 17",
+        },
+      },
       {
         id: 13,
         error: { code: -32602, message: "No target with given id found" },
       },
-      { id: 14, error: { code: -32602, message: "Invalid parameters" } },
-      { id: 15, error: { code: -32602, message: "Invalid parameters" } },
+      {
+        id: 14,
+        error: {
+          code: -32602,
+          message: "Invalid parameters",
+          data: "Failed to deserialize params.width - BINDINGS: int32 value expected at position 30",
+        },
+      },
+      {
+        id: 15,
+        error: {
+          code: -32602,
+          message: "Invalid parameters",
+          data: "Failed to deserialize params.locations.host - BINDINGS: string value expected at position 39",
+        },
+      },
     ]);
   });
 
@@ -2718,7 +2742,7 @@ describe("target lifecycle hooks", () => {
     expect(host.targets().map((target) => target.targetId)).toContain("tab-2");
 
     emit({
-      data: { icdp: "hello", v: 4, title: "Tab 2", url: `${FRAME_ORIGIN}/x` },
+      data: { icdp: "hello", v: 5, title: "Tab 2", url: `${FRAME_ORIGIN}/x` },
       origin: FRAME_ORIGIN,
       source: frame.contentWindow,
     });
@@ -2750,7 +2774,7 @@ describe("target lifecycle hooks", () => {
     expect(settled).toBe(false);
 
     emit({
-      data: { icdp: "hello", v: 4, title: "Ready", url: `${FRAME_ORIGIN}/ready` },
+      data: { icdp: "hello", v: 5, title: "Ready", url: `${FRAME_ORIGIN}/ready` },
       origin: FRAME_ORIGIN,
       source: frame.contentWindow,
     });
@@ -2814,7 +2838,7 @@ describe("target lifecycle hooks", () => {
         host.pair(frame.iframe, { targetId: "fast", origins: [FRAME_ORIGIN] });
         // Complete the handshake synchronously, before returning the id.
         emit({
-          data: { icdp: "hello", v: 4, title: "Fast", url: `${FRAME_ORIGIN}/f` },
+          data: { icdp: "hello", v: 5, title: "Fast", url: `${FRAME_ORIGIN}/f` },
           origin: FRAME_ORIGIN,
           source: frame.contentWindow,
         });

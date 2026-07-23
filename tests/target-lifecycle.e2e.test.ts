@@ -518,11 +518,7 @@ describe("real Chromium Target lifecycle", { timeout: 120_000 }, () => {
         ],
       });
       const browsers = await client.send("Target.getTargets", { filter: [{ type: "browser" }] });
-      expect(browsers.result).toEqual({
-        targetInfos: [
-          expect.objectContaining({ type: "browser", attached: true, title: "", url: "" }),
-        ],
-      });
+      expect(browsers.result).toEqual({ targetInfos: [] });
 
       const direct = await CdpClient.open(String(list[0]?.webSocketDebuggerUrl));
       try {
@@ -537,6 +533,269 @@ describe("real Chromium Target lifecycle", { timeout: 120_000 }, () => {
       } finally {
         direct.close();
       }
+    } finally {
+      client.close();
+      await harness.close();
+    }
+  });
+
+  test("gives each browser connection its own browser Target identity", async () => {
+    const harness = await createHarness();
+    const first = await CdpClient.open(harness.browserWsUrl);
+    const second = await CdpClient.open(harness.browserWsUrl);
+    try {
+      const firstInfo = await first.send("Target.getTargetInfo");
+      const secondInfo = await second.send("Target.getTargetInfo");
+      expect(firstInfo.result).toMatchObject({
+        targetInfo: {
+          type: "browser",
+          title: "",
+          url: "",
+          attached: true,
+          canAccessOpener: false,
+        },
+      });
+      expect(secondInfo.result).toMatchObject({
+        targetInfo: {
+          type: "browser",
+          title: "",
+          url: "",
+          attached: true,
+          canAccessOpener: false,
+        },
+      });
+      expect(
+        (firstInfo.result as { targetInfo: { targetId: string } }).targetInfo.targetId,
+      ).not.toBe((secondInfo.result as { targetInfo: { targetId: string } }).targetInfo.targetId);
+    } finally {
+      second.close();
+      first.close();
+      await harness.close();
+    }
+  });
+
+  test("reports other browser connections through the discovery lifecycle", async () => {
+    const harness = await createHarness();
+    const observer = await CdpClient.open(harness.browserWsUrl);
+    let other: CdpClient | undefined;
+    try {
+      const observerInfo = await observer.send("Target.getTargetInfo");
+      const observerTargetId = (observerInfo.result as { targetInfo: { targetId: string } })
+        .targetInfo.targetId;
+      const discoverFrom = observer.messages.length;
+      const discovered = await observer.send("Target.setDiscoverTargets", {
+        discover: true,
+        filter: [{ type: "browser" }],
+      });
+      const observerCreated = await observer.event(
+        "Target.targetCreated",
+        (message) => {
+          const info = (
+            message.params as
+              | { targetInfo?: { attached?: boolean; targetId?: string; type?: string } }
+              | undefined
+          )?.targetInfo;
+          return (
+            info?.targetId === observerTargetId && info.type === "browser" && info.attached === true
+          );
+        },
+        discoverFrom,
+      );
+      expect(observer.messages.indexOf(observerCreated)).toBeLessThan(
+        observer.messages.indexOf(discovered),
+      );
+
+      const createFrom = observer.messages.length;
+      other = await CdpClient.open(harness.browserWsUrl);
+      const created = await observer.event(
+        "Target.targetCreated",
+        (message) => {
+          const info = (
+            message.params as
+              | { targetInfo?: { attached?: boolean; targetId?: string; type?: string } }
+              | undefined
+          )?.targetInfo;
+          return (
+            info?.targetId !== observerTargetId &&
+            info?.type === "browser" &&
+            info.attached === false
+          );
+        },
+        createFrom,
+      );
+      const otherTargetId = (created.params as { targetInfo: { targetId: string } }).targetInfo
+        .targetId;
+      const attached = await observer.event(
+        "Target.targetInfoChanged",
+        (message) => {
+          const info = (
+            message.params as
+              | { targetInfo?: { attached?: boolean; targetId?: string; type?: string } }
+              | undefined
+          )?.targetInfo;
+          return (
+            info?.targetId === otherTargetId && info.type === "browser" && info.attached === true
+          );
+        },
+        createFrom,
+      );
+      expect(observer.messages.indexOf(created)).toBeLessThan(observer.messages.indexOf(attached));
+      expect(await other.send("Target.getTargetInfo")).toMatchObject({
+        result: { targetInfo: { targetId: otherTargetId, attached: true } },
+      });
+      expect(
+        await observer.send("Target.getTargetInfo", { targetId: otherTargetId }),
+      ).toMatchObject({
+        result: { targetInfo: { targetId: otherTargetId, attached: true } },
+      });
+      expect(
+        await observer.send("Target.getTargets", { filter: [{ type: "browser" }] }),
+      ).toMatchObject({ result: { targetInfos: [] } });
+
+      const destroyFrom = observer.messages.length;
+      other.close();
+      other = undefined;
+      const detached = await observer.event(
+        "Target.targetInfoChanged",
+        (message) => {
+          const info = (
+            message.params as { targetInfo?: { attached?: boolean; targetId?: string } } | undefined
+          )?.targetInfo;
+          return info?.targetId === otherTargetId && info.attached === false;
+        },
+        destroyFrom,
+      );
+      const destroyed = await observer.event(
+        "Target.targetDestroyed",
+        (message) =>
+          (message.params as { targetId?: string } | undefined)?.targetId === otherTargetId,
+        destroyFrom,
+      );
+      expect(observer.messages.indexOf(detached)).toBeLessThan(
+        observer.messages.indexOf(destroyed),
+      );
+      expect(
+        await observer.send("Target.getTargetInfo", { targetId: otherTargetId }),
+      ).toMatchObject({
+        error: { code: -32602, message: "No target with given id found" },
+      });
+    } finally {
+      other?.close();
+      observer.close();
+      await harness.close();
+    }
+  });
+
+  test("updates discovered Target metadata after same-document navigation", async () => {
+    const harness = await createHarness();
+    const client = await CdpClient.open(harness.browserWsUrl);
+    try {
+      await client.send("Target.setDiscoverTargets", { discover: true });
+      const initial = await client.send("Target.getTargetInfo", { targetId: "page-1" });
+      const initialUrl = (initial.result as { targetInfo: { url: string } }).targetInfo.url;
+      const expectedUrl = new URL(initialUrl);
+      expectedUrl.search = "?state=updated";
+      expectedUrl.hash = "#section";
+      const attached = await client.send("Target.attachToTarget", {
+        targetId: "page-1",
+        flatten: true,
+      });
+      const sessionId = (attached.result as { sessionId: string }).sessionId;
+      const changedFrom = client.messages.length;
+
+      await client.send(
+        "Runtime.evaluate",
+        {
+          expression: 'history.pushState({}, "", location.pathname + "?state=updated#section")',
+        },
+        sessionId,
+      );
+
+      const changed = await client.event(
+        "Target.targetInfoChanged",
+        (message) => {
+          const info = (
+            message.params as { targetInfo?: { targetId?: string; url?: string } } | undefined
+          )?.targetInfo;
+          return (
+            info?.targetId === "page-1" &&
+            info.url?.endsWith("/target/page-1?state=updated#section") === true
+          );
+        },
+        changedFrom,
+      );
+      const targetInfo = (changed.params as { targetInfo: { targetId: string; url: string } })
+        .targetInfo;
+      expect(targetInfo.url).toBe(expectedUrl.href);
+
+      expect(await client.send("Target.getTargetInfo", { targetId: "page-1" })).toMatchObject({
+        result: {
+          targetInfo: {
+            targetId: "page-1",
+            url: targetInfo.url,
+          },
+        },
+      });
+      await until(async () => {
+        const targets = (await (
+          await fetch(`${harness.browserOrigin}/json/list`)
+        ).json()) as Array<{ id: string; url: string }>;
+        return targets.some((target) => target.id === "page-1" && target.url === targetInfo.url);
+      }, "/json/list metadata update");
+    } finally {
+      client.close();
+      await harness.close();
+    }
+  });
+
+  test("updates discovered Target metadata after a title mutation", async () => {
+    const harness = await createHarness();
+    const client = await CdpClient.open(harness.browserWsUrl);
+    try {
+      await client.send("Target.setDiscoverTargets", { discover: true });
+      const attached = await client.send("Target.attachToTarget", {
+        targetId: "page-1",
+        flatten: true,
+      });
+      const sessionId = (attached.result as { sessionId: string }).sessionId;
+      const changedFrom = client.messages.length;
+
+      await client.send(
+        "Runtime.evaluate",
+        { expression: 'document.title = "Updated Target"' },
+        sessionId,
+      );
+
+      const changed = await client.event(
+        "Target.targetInfoChanged",
+        (message) => {
+          const info = (
+            message.params as { targetInfo?: { targetId?: string; title?: string } } | undefined
+          )?.targetInfo;
+          return info?.targetId === "page-1" && info.title === "Updated Target";
+        },
+        changedFrom,
+      );
+      const targetInfo = (changed.params as { targetInfo: { targetId: string; title: string } })
+        .targetInfo;
+      expect(targetInfo.title).toBe("Updated Target");
+
+      expect(await client.send("Target.getTargetInfo", { targetId: "page-1" })).toMatchObject({
+        result: {
+          targetInfo: {
+            targetId: "page-1",
+            title: "Updated Target",
+          },
+        },
+      });
+      await until(async () => {
+        const targets = (await (
+          await fetch(`${harness.browserOrigin}/json/list`)
+        ).json()) as Array<{ id: string; title: string }>;
+        return targets.some(
+          (target) => target.id === "page-1" && target.title === "Updated Target",
+        );
+      }, "/json/list title update");
     } finally {
       client.close();
       await harness.close();
@@ -828,6 +1087,23 @@ describe("real Chromium Target lifecycle", { timeout: 120_000 }, () => {
         client.messages.indexOf(enabled),
       );
 
+      const metadataFrom = client.messages.length;
+      await client.send(
+        "Runtime.evaluate",
+        { expression: 'document.title = "Auto-attached Target"' },
+        initialSessionId,
+      );
+      await client.event(
+        "Target.targetInfoChanged",
+        (message) => {
+          const info = (
+            message.params as { targetInfo?: { targetId?: string; title?: string } } | undefined
+          )?.targetInfo;
+          return info?.targetId === "page-1" && info.title === "Auto-attached Target";
+        },
+        metadataFrom,
+      );
+
       const createFrom = client.messages.length;
       const created = await client.send("Target.createTarget", {
         url: "https://client.example/auto",
@@ -922,7 +1198,11 @@ describe("real Chromium Target lifecycle", { timeout: 120_000 }, () => {
         expect.objectContaining({ code: -32700 }),
         { code: -32600, message: "Message must have string 'method' property" },
         { code: -32601, message: "'NoSuch.domain' wasn't found" },
-        { code: -32602, message: "Invalid parameters" },
+        {
+          code: -32602,
+          message: "Invalid parameters",
+          data: "Failed to deserialize params.targetId - BINDINGS: mandatory field missing at position 8",
+        },
         { code: -32000, message: "Not supported" },
         { code: -32001, message: "Session with given id not found." },
       ]);

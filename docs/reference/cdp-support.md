@@ -5,7 +5,7 @@ description: "The exact Chromium-shaped CDP methods icdp implements and the brow
 # CDP support
 
 icdp implements a deliberately small, current CDP surface. The Frame Agent
-implements exactly **37 methods**. Every name below exists in the installed
+implements exactly **38 methods**. Every name below exists in the installed
 Chromium DevTools protocol schema; tests lock the list to both the
 implementation and that schema.
 
@@ -44,6 +44,7 @@ DOM.enable
 DOM.getBoxModel
 DOM.getDocument
 DOM.querySelectorAll
+DOM.requestChildNodes
 DOM.requestNode
 DOM.resolveNode
 DOM.scrollIntoViewIfNeeded
@@ -53,16 +54,21 @@ Frontend `nodeId` values are allocated independently per Session. Shared
 `backendNodeId` values identify nodes only within the current document.
 `DOM.getDocument` resets that Session's frontend ids and implicitly enables
 the domain. Its Chromium default depth is two; `DOM.describeNode` defaults to
-depth zero. Open shadow-root metadata is returned with ordinary nodes, and
-`pierce: true` traverses those roots. `DOM.resolveNode` and `DOM.requestNode`
-bridge DOM ids and that Session's Runtime object handles.
+depth zero. `DOM.requestChildNodes` materializes a container's frontend
+children before subsequent mutation events. Open shadow-root metadata is
+returned with ordinary nodes, and `pierce: true` traverses those roots.
+`DOM.resolveNode` and `DOM.requestNode` bridge DOM ids and that Session's
+Runtime object handles, including detached subtrees.
 
 While DOM is enabled, attribute, text, insertion, and removal events are
 emitted only for frontend nodes already bound in that Session. Removing a
 subtree invalidates its frontend ids.
 
 `DOM.getBoxModel` uses page layout geometry and computed margins, borders, and
-padding. It does not expose Chromium's layout tree or compositor internals.
+padding. Text-node geometry comes from a DOM `Range`; unlike Blink's internal
+`LayoutText` visual-overflow quad, it cannot preserve rotated glyph quads or
+text-shadow overflow. It does not expose Chromium's layout tree or compositor
+internals.
 
 ### Input
 
@@ -75,9 +81,12 @@ Input.insertText
 These commands dispatch DOM keyboard, pointer, mouse, wheel, input, and click
 behavior inside the frame. Mouse dispatch carries supported pressure, pen,
 tilt, tangential-pressure, and twist fields into synthetic `PointerEvent`s.
-The resulting events are synthetic (`Event.isTrusted === false`). They cannot
-reproduce native composition, browser shortcuts, file pickers, drag-and-drop,
-or privileged default actions.
+Keyboard, pointer, mouse, and manually cancellable `beforeinput` events are
+synthetic (`Event.isTrusted === false`). Where Chromium permits it,
+`Input.insertText` delegates the edit to the browser's editing command and the
+resulting `input` event is browser-generated. These commands cannot reproduce
+native composition, browser shortcuts, file pickers, drag-and-drop, or
+privileged default actions.
 
 ### Network
 
@@ -129,6 +138,10 @@ event from Chromium's Navigation API. A cancelled or intercepted navigation
 cannot leak its reserved loader id into a later reload. `Page.reload` validates
 an optional loader id before calling the page reload API.
 
+The Frame Agent does not embed Chromium's public-suffix database, so
+`Frame.domainAndRegistry` is empty. Security-origin localhost and
+cross-origin-isolation metadata are derived from the live frame.
+
 ### Runtime
 
 ```text
@@ -154,6 +167,12 @@ serialization, timeout, user-gesture, and REPL options fail explicitly. It
 runs ordinary JavaScript in the page realm; there are no isolated worlds,
 inspector pause state, breakpoints, debugger object previews, heap inspection,
 or V8 profiler integration.
+
+Page JavaScript also has no standard way to identify an arbitrary `Proxy`
+without invoking observable traps. Runtime therefore cannot reproduce V8's
+inspector-only `subtype: "proxy"` metadata for proxies created by the page.
+Ordinary objects, arrays, DOM wrappers, errors, promises, typed collections,
+and Trusted Types retain their Chromium RemoteObject shapes.
 
 `Runtime.runIfWaitingForDebugger` returns success because an icdp document is
 never held on Chromium's debugger-on-start gate; it does not emulate a
@@ -208,10 +227,15 @@ Specifically unsupported:
   drag interception, downloads, or dialog control;
 - native request interception, response rewriting, throttling, cache control,
   document/subresource coverage, or service-worker traffic;
+- duplicate names inside the `params` object retain JavaScript JSON parsing
+  semantics (the last value wins); duplicate command-envelope names are
+  rejected in wire order like Chromium;
 - Debugger, Profiler, HeapProfiler, Memory, Audits, Security, Emulation,
   ServiceWorker, Target worker/OOPIF, and browser-process domains;
 - DOM access inside child-frame documents, closed or user-agent shadow roots,
   and browser-internal trees;
+- V8's inspector-only proxy identity and exact transformed text visual-overflow
+  quads;
 - legacy non-flat `Target.sendMessageToTarget` sessions.
 
 Generic CDP clients may work when they stay inside the documented surface.

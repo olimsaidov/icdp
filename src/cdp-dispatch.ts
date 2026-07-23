@@ -283,26 +283,150 @@ function matchesParamType(value: unknown, type: CdpParamType): boolean {
   return typeof value === type;
 }
 
+function cborHeaderSize(length: number): number {
+  if (length < 24) return 1;
+  if (length <= 0xff) return 2;
+  if (length <= 0xffff) return 3;
+  return 5;
+}
+
+function utf8Length(value: string): number {
+  return new TextEncoder().encode(value).length;
+}
+
+function cborValueSize(value: unknown): number {
+  if (value === null || typeof value === "boolean") return 1;
+  if (typeof value === "number") {
+    if (!Number.isInteger(value) || value < -2_147_483_648 || value > 2_147_483_647) {
+      return 9;
+    }
+    const magnitude = value < 0 ? -1 - value : value;
+    return cborHeaderSize(magnitude);
+  }
+  if (typeof value === "string") {
+    const length = utf8Length(value);
+    return cborHeaderSize(length) + length;
+  }
+  if (Array.isArray(value)) {
+    return 9 + value.reduce((size, item) => size + cborValueSize(item), 0);
+  }
+  if (isRecord(value)) {
+    return (
+      9 +
+      Object.entries(value).reduce(
+        (size, [name, item]) => size + cborValueSize(name) + cborValueSize(item),
+        0,
+      )
+    );
+  }
+  return 1;
+}
+
+function bindingPosition(params: Record<string, unknown>, target: string): number {
+  let position = 8;
+  for (const [name, value] of Object.entries(params)) {
+    position += cborValueSize(name);
+    if (name === target) return position;
+    position += cborValueSize(value);
+  }
+  return position;
+}
+
+function nestedBindingPosition(
+  params: Record<string, unknown>,
+  path: readonly (string | number)[],
+): number {
+  let current: unknown = params;
+  let position = 8;
+  for (const [pathIndex, segment] of path.entries()) {
+    if (typeof segment === "number") {
+      position += 8;
+      if (!Array.isArray(current)) return position;
+      for (let index = 0; index < segment; index++) {
+        position += cborValueSize(current[index]);
+      }
+      current = current[segment];
+      continue;
+    }
+
+    if (pathIndex > 0) position += 8;
+    if (!isRecord(current)) return position;
+    let found = false;
+    for (const [name, value] of Object.entries(current)) {
+      if (name === segment) {
+        position += cborValueSize(name);
+        current = value;
+        found = true;
+        break;
+      }
+      position += cborValueSize(name) + cborValueSize(value);
+    }
+    if (!found) return position;
+  }
+  return position;
+}
+
+function invalidParam(
+  params: Record<string, unknown>,
+  path: readonly (string | number)[],
+  type: CdpParamType,
+  missing: boolean,
+  expectationOverride?: string,
+): CdpError {
+  const expectation =
+    expectationOverride ??
+    (missing
+      ? "BINDINGS: mandatory field missing"
+      : type === "array"
+        ? "CBOR: array start expected"
+        : `BINDINGS: ${
+            {
+              boolean: "bool",
+              integer: "int32",
+              number: "double",
+              object: "dictionary",
+              string: "string",
+            }[type]
+          } value expected`);
+  const displayPath = path.filter((segment): segment is string => typeof segment === "string");
+  return {
+    code: CDP_INVALID_PARAMS,
+    message: "Invalid parameters",
+    data: `Failed to deserialize params.${displayPath.join(".")} - ${expectation} at position ${
+      path.length === 1 && typeof path[0] === "string"
+        ? bindingPosition(params, path[0])
+        : nestedBindingPosition(params, path)
+    }`,
+  };
+}
+
+export function invalidNestedCdpParam(
+  params: Record<string, unknown>,
+  path: readonly (string | number)[],
+  type: CdpParamType,
+  options: { expectation?: string; missing?: boolean } = {},
+): CdpError {
+  return invalidParam(params, path, type, options.missing ?? false, options.expectation);
+}
+
 export function validateCdpParams(
   params: Record<string, unknown>,
   schema: CdpParamSchema | undefined,
+  validateNested?: (name: string, value: unknown) => CdpError | undefined,
 ): CdpError | undefined {
   if (!schema) return;
 
-  for (const [name, type] of Object.entries(schema.required ?? {})) {
-    if (
-      !Object.prototype.hasOwnProperty.call(params, name) ||
-      !matchesParamType(params[name], type)
-    ) {
-      return { code: CDP_INVALID_PARAMS, message: "Invalid parameters" };
+  for (const [name, value] of Object.entries(params)) {
+    const type = schema.required?.[name] ?? schema.optional?.[name];
+    if (type !== undefined && !matchesParamType(value, type)) {
+      return invalidParam(params, [name], type, false);
     }
+    const nestedError = validateNested?.(name, value);
+    if (nestedError) return nestedError;
   }
-  for (const [name, type] of Object.entries(schema.optional ?? {})) {
-    if (
-      Object.prototype.hasOwnProperty.call(params, name) &&
-      !matchesParamType(params[name], type)
-    ) {
-      return { code: CDP_INVALID_PARAMS, message: "Invalid parameters" };
+  for (const [name, type] of Object.entries(schema.required ?? {})) {
+    if (!Object.prototype.hasOwnProperty.call(params, name)) {
+      return invalidParam(params, [name], type, true);
     }
   }
 }

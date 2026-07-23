@@ -149,6 +149,50 @@ test("reports a schema-complete fetch lifecycle with one stable request id and b
   });
 });
 
+test("omits dataReceived for empty 204 and Content-Length zero fetch responses", async () => {
+  const nativeFetch = vi.fn((input: RequestInfo | URL) => {
+    const url = String(input);
+    const noContent = url.endsWith("/empty-204");
+    return Promise.resolve({
+      clone: () =>
+        noContent
+          ? { body: null }
+          : {
+              body: new ReadableStream<Uint8Array>({
+                start(controller) {
+                  controller.close();
+                },
+              }),
+            },
+      headers: headers(noContent ? {} : { "content-length": "0" }),
+      status: noContent ? 204 : 200,
+      statusText: noContent ? "No Content" : "OK",
+      url,
+    } as unknown as Response);
+  }) as unknown as typeof fetch;
+  Object.defineProperty(window, "fetch", {
+    configurable: true,
+    value: nativeFetch,
+    writable: true,
+  });
+  const events: EmittedEvent[] = [];
+  const observer = new NetworkObserver(window, (method, params) => {
+    events.push({ method, params });
+  });
+  observer.install();
+
+  const noContentRequestId = await fetchAndRequestId(events, "empty-204");
+  const zeroLengthRequestId = await fetchAndRequestId(events, "empty-content-length");
+
+  for (const requestId of [noContentRequestId, zeroLengthRequestId]) {
+    expect(
+      events.filter((event) => event.params.requestId === requestId).map((event) => event.method),
+    ).toEqual(["Network.requestWillBeSent", "Network.responseReceived", "Network.loadingFinished"]);
+    expect(observer.getResponseBody(requestId).body).toBe("");
+  }
+  observer.uninstall();
+});
+
 // Ported from Chromium:
 // content/browser/devtools/protocol/network_handler.cc
 // NetworkHandler::ProcessDurableMessageOrGetLocalData

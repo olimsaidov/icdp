@@ -1,6 +1,10 @@
 import type Protocol from "devtools-protocol";
 
-import { validateCdpParams, type CdpParamSchema } from "../../cdp-dispatch.ts";
+import {
+  invalidNestedCdpParam,
+  validateCdpParams,
+  type CdpParamSchema,
+} from "../../cdp-dispatch.ts";
 import {
   CDP_INVALID_PARAMS,
   CDP_METHOD_NOT_FOUND,
@@ -40,6 +44,7 @@ export const FRAME_METHODS = Object.freeze(
     "DOM.getBoxModel",
     "DOM.getDocument",
     "DOM.querySelectorAll",
+    "DOM.requestChildNodes",
     "DOM.requestNode",
     "DOM.resolveNode",
     "DOM.scrollIntoViewIfNeeded",
@@ -102,8 +107,57 @@ function allocateExecutionContextId(): number {
   return id;
 }
 
+function allocateUniqueExecutionContextId(contextId: number): string {
+  return `${Math.floor(Math.random() * Number.MAX_SAFE_INTEGER)}.${contextId}`;
+}
+
+function isInt64Pair(value: string): boolean {
+  const parts = value.split(".");
+  if (parts.length !== 2 || parts.some((part) => !/^-?\d+$/.test(part))) return false;
+  const minimum = -(2n ** 63n);
+  const maximum = 2n ** 63n - 1n;
+  return parts.every((part) => {
+    const integer = BigInt(part);
+    return integer >= minimum && integer <= maximum;
+  });
+}
+
 function allocateLoaderId(): string {
   return `icdp-loader-${Math.random().toString(36).slice(2)}`;
+}
+
+function isLocalhost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  return (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host === "::1" ||
+    /^127(?:\.\d{1,3}){3}$/.test(host)
+  );
+}
+
+function textNodeIsVisible(value: string): boolean {
+  return !/^[\t-\r \u1680\u2000-\u200a\u2028\u205f\u3000]*$/.test(value);
+}
+
+function protocolNodeValue(value: string): string {
+  return value.length > 10_000 ? `${value.slice(0, 10_000)}…` : value;
+}
+
+function mutationAttributeName(record: MutationRecord, element: Element): string {
+  const attribute = Array.from(element.attributes).find(
+    (candidate) =>
+      candidate.localName === record.attributeName &&
+      candidate.namespaceURI === record.attributeNamespace,
+  );
+  if (attribute) return attribute.name;
+  if (record.attributeNamespace === "http://www.w3.org/1999/xlink") {
+    return `xlink:${record.attributeName}`;
+  }
+  const prefix = record.attributeNamespace
+    ? element.lookupPrefix(record.attributeNamespace)
+    : undefined;
+  return prefix ? `${prefix}:${record.attributeName}` : record.attributeName!;
 }
 
 const PENDING_LOADER_ID_KEY = "__icdp_pending_loader_id__";
@@ -167,6 +221,10 @@ const FRAME_PARAM_SCHEMAS: Record<string, CdpParamSchema> = {
   },
   "DOM.querySelectorAll": {
     required: { nodeId: "integer", selector: "string" },
+  },
+  "DOM.requestChildNodes": {
+    required: { nodeId: "integer" },
+    optional: { depth: "integer", pierce: "boolean" },
   },
   "DOM.requestNode": {
     required: { objectId: "string" },
@@ -315,8 +373,15 @@ const FRAME_PARAM_SCHEMAS: Record<string, CdpParamSchema> = {
   },
 };
 
-function protocolError(code: number, message: string): Error & { code: number } {
-  return Object.assign(new Error(message), { code });
+function protocolError(
+  code: number,
+  message: string,
+  data?: unknown,
+): Error & { code: number; data?: unknown } {
+  return Object.assign(new Error(message), {
+    code,
+    ...(data === undefined ? {} : { data }),
+  });
 }
 
 function isProtocolValue(value: unknown, seen = new Set<object>()): boolean {
@@ -334,25 +399,62 @@ function isProtocolValue(value: unknown, seen = new Set<object>()): boolean {
   return valid;
 }
 
-function validCallArguments(value: unknown): boolean {
-  if (value === undefined) return true;
-  if (!Array.isArray(value)) return false;
-  return value.every((argument) => {
+function nestedRuntimeParamError(method: string, params: Record<string, unknown>, name: string) {
+  if (
+    (method === "Runtime.evaluate" || method === "Runtime.callFunctionOn") &&
+    name === "serializationOptions"
+  ) {
+    if (
+      typeof params.serializationOptions !== "object" ||
+      params.serializationOptions === null ||
+      Array.isArray(params.serializationOptions)
+    ) {
+      return invalidNestedCdpParam(params, ["serializationOptions"], "object");
+    }
+    const options = params.serializationOptions as Record<string, unknown>;
+    if (!Object.prototype.hasOwnProperty.call(options, "serialization")) {
+      return invalidNestedCdpParam(params, ["serializationOptions", "serialization"], "string", {
+        missing: true,
+      });
+    }
+    if (typeof options.serialization !== "string") {
+      return invalidNestedCdpParam(params, ["serializationOptions", "serialization"], "string");
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(options, "maxDepth") &&
+      (!Number.isInteger(options.maxDepth) ||
+        Number(options.maxDepth) < -2_147_483_648 ||
+        Number(options.maxDepth) > 2_147_483_647)
+    ) {
+      return invalidNestedCdpParam(params, ["serializationOptions", "maxDepth"], "integer");
+    }
+  }
+
+  if (method !== "Runtime.callFunctionOn" || name !== "arguments") return;
+  if (!Array.isArray(params.arguments)) {
+    return invalidNestedCdpParam(params, ["arguments"], "array");
+  }
+  const arguments_ = params.arguments as unknown[];
+  for (const [index, argument] of arguments_.entries()) {
     if (typeof argument !== "object" || argument === null || Array.isArray(argument)) {
-      return false;
+      return invalidNestedCdpParam(params, ["arguments", index], "object", {
+        expectation: "CBOR: map start expected",
+      });
     }
     const record = argument as Record<string, unknown>;
     if (record.objectId !== undefined && typeof record.objectId !== "string") {
-      return false;
+      return invalidNestedCdpParam(params, ["arguments", index, "objectId"], "string");
     }
     if (
       record.unserializableValue !== undefined &&
       typeof record.unserializableValue !== "string"
     ) {
-      return false;
+      return invalidNestedCdpParam(params, ["arguments", index, "unserializableValue"], "string");
     }
-    return !Object.prototype.hasOwnProperty.call(record, "value") || isProtocolValue(record.value);
-  });
+    if (Object.prototype.hasOwnProperty.call(record, "value") && !isProtocolValue(record.value)) {
+      return invalidNestedCdpParam(params, ["arguments", index, "value"], "object");
+    }
+  }
 }
 
 class FrameSession {
@@ -360,9 +462,9 @@ class FrameSession {
   readonly enabledDomains = new Set<string>();
   private pressedElement: Element | undefined;
   private hoveredElement: Element | undefined;
-  private lastClickElement: Element | undefined;
-  private lastClickTime = 0;
-  private objects = new RemoteObjectStore();
+  private suppressCompatibilityMouse = false;
+  private readonly detachedNodes = new WeakSet<Node>();
+  private readonly objects: RemoteObjectStore;
   private nextExceptionId = 1;
   private includeWhitespace = false;
   private readonly networkRequestIds = new Set<string>();
@@ -372,6 +474,7 @@ class FrameSession {
     private readonly backend: FrameBackend,
   ) {
     this.nodes = new SessionNodeRegistry(backend.backendNodes);
+    this.objects = new RemoteObjectStore(backend.remoteObjectScope());
   }
 
   restore(
@@ -412,8 +515,10 @@ class FrameSession {
   }
 
   async dispatch(method: string, params: Record<string, unknown>): Promise<unknown> {
-    const paramError = validateCdpParams(params, FRAME_PARAM_SCHEMAS[method]);
-    if (paramError) throw protocolError(paramError.code, paramError.message);
+    const paramError = validateCdpParams(params, FRAME_PARAM_SCHEMAS[method], (name) =>
+      nestedRuntimeParamError(method, params, name),
+    );
+    if (paramError) throw protocolError(paramError.code, paramError.message, paramError.data);
     if (method === "Accessibility.enable") {
       this.enabledDomains.add("Accessibility");
       return {};
@@ -546,6 +651,31 @@ class FrameSession {
         nodeIds: Array.from(matches).map((node) => this.pushNodePathToFrontend(node)),
       } satisfies Protocol.DOM.QuerySelectorAllResponse;
     }
+    if (method === "DOM.requestChildNodes") {
+      const root = this.nodes.nodeForNodeId(Number(params.nodeId));
+      const depth = Number(params.depth ?? 1);
+      if (depth === 0 || depth < -1) {
+        throw new Error("Please provide a positive integer as a depth or -1 for entire subtree");
+      }
+      if (!root || !this.isContainerNode(root)) return {};
+      const nextDepth = depth < 0 ? -1 : depth - 1;
+      const parentId = Number(params.nodeId);
+      const pierce = Boolean(params.pierce);
+      if (!this.nodes.childrenWereRequested(root)) {
+        const nodes = this.visibleChildren(root).map((child) => {
+          const serialized = this.serializeNode(child, nextDepth, pierce);
+          serialized.parentId = parentId;
+          return serialized;
+        });
+        this.nodes.markChildrenRequested(root);
+        this.emit("DOM.setChildNodes", { parentId, nodes });
+      } else if (nextDepth !== 0) {
+        for (const child of this.visibleChildren(root)) {
+          this.materializeUnrequestedChildren(child, nextDepth, pierce);
+        }
+      }
+      return {};
+    }
     if (method === "DOM.describeNode") {
       const node = this.resolveNode(params);
       return {
@@ -554,9 +684,7 @@ class FrameSession {
     }
     if (method === "DOM.getBoxModel") {
       const node = this.resolveNode(params);
-      const element = node instanceof Element ? node : node.parentElement;
-      if (!element) throw new Error("Could not compute box model.");
-      return { model: boxModel(element) } satisfies Protocol.DOM.GetBoxModelResponse;
+      return { model: boxModelForNode(node) } satisfies Protocol.DOM.GetBoxModelResponse;
     }
     if (method === "DOM.resolveNode") {
       const targetFields = ["nodeId", "backendNodeId"].filter(
@@ -689,11 +817,14 @@ class FrameSession {
     }
     if (method === "Runtime.disable") {
       this.enabledDomains.delete("Runtime");
-      this.objects = new RemoteObjectStore();
       return {};
     }
     if (method === "Runtime.runIfWaitingForDebugger") return {};
     if (method === "Runtime.evaluate") {
+      this.validateExecutionContext({
+        contextId: params.contextId,
+        uniqueContextId: params.uniqueContextId,
+      });
       this.rejectPresentOptions(params, ["timeout", "serializationOptions"]);
       this.rejectTruthyOptions(params, [
         "includeCommandLineAPI",
@@ -707,9 +838,6 @@ class FrameSession {
       return await this.evaluate(params);
     }
     if (method === "Runtime.callFunctionOn") {
-      if (!validCallArguments(params.arguments)) {
-        throw protocolError(CDP_INVALID_PARAMS, "Invalid parameters");
-      }
       return await this.callFunctionOn(params);
     }
     if (method === "Runtime.getProperties") {
@@ -810,54 +938,133 @@ class FrameSession {
 
   domMutations(records: MutationRecord[]): void {
     if (!this.enabledDomains.has("DOM")) return;
-    for (const record of records) {
+    for (const [index, record] of records.entries()) {
       const nodeId = this.nodes.idForNode(record.target);
       if (record.type === "attributes") {
         if (nodeId === 0 || !record.attributeName) continue;
         const element = record.target as Element;
-        const value = element.getAttribute(record.attributeName);
+        const nextRecord = records
+          .slice(index + 1)
+          .find(
+            (candidate) =>
+              candidate.type === "attributes" &&
+              candidate.target === record.target &&
+              candidate.attributeName === record.attributeName &&
+              candidate.attributeNamespace === record.attributeNamespace,
+          );
+        const value = nextRecord
+          ? nextRecord.oldValue
+          : element.getAttributeNS(record.attributeNamespace, record.attributeName);
+        const name = mutationAttributeName(record, element);
         if (value === null) {
           this.emit("DOM.attributeRemoved", {
             nodeId,
-            name: record.attributeName,
+            name,
           });
         } else {
           this.emit("DOM.attributeModified", {
             nodeId,
-            name: record.attributeName,
+            name,
             value,
           });
         }
         continue;
       }
       if (record.type === "characterData") {
-        if (nodeId !== 0) {
+        const nextRecord = records
+          .slice(index + 1)
+          .find(
+            (candidate) => candidate.type === "characterData" && candidate.target === record.target,
+          );
+        const characterData = nextRecord
+          ? (nextRecord.oldValue ?? "")
+          : (record.target.nodeValue ?? "");
+        const wasVisible = this.includeWhitespace || textNodeIsVisible(record.oldValue ?? "");
+        const isVisible = this.includeWhitespace || textNodeIsVisible(characterData);
+        const parent = this.frontendParent(record.target);
+        const parentId = parent ? this.nodes.idForNode(parent) : 0;
+        const visibleChildrenAtRecord = parent
+          ? this.visibleChildrenAtRecord(parent, index, records)
+          : [];
+        if (wasVisible && !isVisible) {
+          if (
+            nodeId !== 0 &&
+            parent &&
+            parentId !== 0 &&
+            this.nodes.childrenWereRequested(parent)
+          ) {
+            this.emit("DOM.childNodeRemoved", { parentNodeId: parentId, nodeId });
+          } else if (parentId !== 0) {
+            this.emit("DOM.childNodeCountUpdated", {
+              nodeId: parentId,
+              childNodeCount: visibleChildrenAtRecord.length,
+            });
+          }
+          this.nodes.unbindSubtree(record.target);
+        } else if (!wasVisible && isVisible) {
+          if (parent && parentId !== 0 && this.nodes.childrenWereRequested(parent)) {
+            const previous = this.previousVisibleNode(
+              record.target,
+              visibleChildrenAtRecord,
+              index,
+              records,
+            );
+            const node = this.serializeNode(record.target, 0, false);
+            node.nodeValue = protocolNodeValue(characterData);
+            this.emit("DOM.childNodeInserted", {
+              parentNodeId: parentId,
+              previousNodeId: previous ? this.nodes.idForNode(previous) : 0,
+              node,
+            });
+          } else if (parentId !== 0) {
+            this.emit("DOM.childNodeCountUpdated", {
+              nodeId: parentId,
+              childNodeCount: visibleChildrenAtRecord.length,
+            });
+          }
+        } else if (isVisible && nodeId !== 0) {
           this.emit("DOM.characterDataModified", {
             nodeId,
-            characterData: record.target.nodeValue ?? "",
+            characterData,
           });
         }
         continue;
       }
       if (nodeId === 0) continue;
+      const childrenAtRecord = this.childrenAtRecord(record.target, index, records);
+      const visibleChildrenAtRecord = childrenAtRecord.filter((child) =>
+        this.nodeIsVisibleAtRecord(child, index, records),
+      );
       if (!this.nodes.childrenWereRequested(record.target)) {
+        const visibleRemoved = Array.from(record.removedNodes).filter((node) =>
+          this.nodeIsVisibleAtRecord(node, index, records),
+        );
+        const visibleAdded = Array.from(record.addedNodes).filter((node) =>
+          this.nodeIsVisibleAtRecord(node, index, records),
+        );
+        let childNodeCount =
+          visibleChildrenAtRecord.length - visibleAdded.length + visibleRemoved.length;
         for (const removed of Array.from(record.removedNodes)) {
-          this.nodes.unbindSubtree(removed);
-        }
-        const visibleChange =
-          Array.from(record.removedNodes).some((node) => this.nodeIsVisible(node)) ||
-          Array.from(record.addedNodes).some((node) => this.nodeIsVisible(node));
-        if (visibleChange) {
+          this.unbindMutationSubtree(removed, index, records);
+          if (!visibleRemoved.includes(removed)) continue;
+          childNodeCount--;
           this.emit("DOM.childNodeCountUpdated", {
             nodeId,
-            childNodeCount: this.visibleChildren(record.target).length,
+            childNodeCount,
+          });
+        }
+        for (const _added of visibleAdded) {
+          childNodeCount++;
+          this.emit("DOM.childNodeCountUpdated", {
+            nodeId,
+            childNodeCount,
           });
         }
         continue;
       }
       for (const removed of Array.from(record.removedNodes)) {
-        if (!this.nodeIsVisible(removed)) {
-          this.nodes.unbindSubtree(removed);
+        if (!this.nodeIsVisibleAtRecord(removed, index, records)) {
+          this.unbindMutationSubtree(removed, index, records);
           continue;
         }
         const removedNodeId = this.nodes.idForNode(removed);
@@ -867,18 +1074,41 @@ class FrameSession {
             nodeId: removedNodeId,
           });
         }
-        this.nodes.unbindSubtree(removed);
+        this.unbindMutationSubtree(removed, index, records);
       }
       for (const added of Array.from(record.addedNodes)) {
-        if (!this.nodeIsVisible(added)) continue;
-        const previous = this.previousVisibleSibling(added);
+        if (!this.nodeIsVisibleAtRecord(added, index, records)) continue;
+        if (this.detachedNodes.has(added)) {
+          this.nodes.unbindSubtree(added);
+          this.detachedNodes.delete(added);
+        }
+        const previous = this.previousVisibleNode(added, childrenAtRecord, index, records);
         this.emit("DOM.childNodeInserted", {
           parentNodeId: nodeId,
           previousNodeId: previous ? this.nodes.idForNode(previous) : 0,
-          node: this.serializeNode(added, 0, false),
+          node: this.serializeMutationNode(added, index, records),
         });
       }
     }
+  }
+
+  domShadowRootPushed(host: Element, root: ShadowRoot): void {
+    if (!this.enabledDomains.has("DOM")) return;
+    const hostId = this.nodes.idForNode(host);
+    if (hostId === 0) return;
+    if (!this.nodes.childrenWereRequested(host)) {
+      const nodes = this.visibleChildren(host).map((child) => {
+        const serialized = this.serializeNode(child, 0, false);
+        serialized.parentId = hostId;
+        return serialized;
+      });
+      this.nodes.markChildrenRequested(host);
+      this.emit("DOM.setChildNodes", { parentId: hostId, nodes });
+    }
+    this.emit("DOM.shadowRootPushed", {
+      hostId,
+      root: this.serializeNode(root, 0, false),
+    });
   }
 
   private resolveNode(params: Record<string, unknown>): Node {
@@ -950,7 +1180,7 @@ class FrameSession {
     const keyboardEvent = (eventType: string): KeyboardEvent => {
       const event = new view.KeyboardEvent(eventType, init);
       const text = typeof params.text === "string" ? params.text : "";
-      const charCode = type === "char" ? Array.from(text)[0]?.codePointAt(0) : undefined;
+      const charCode = eventType === "keypress" ? Array.from(text)[0]?.codePointAt(0) : undefined;
       const virtualKeyCode = params.windowsVirtualKeyCode;
       const keyCode =
         charCode ?? (virtualKeyCode === undefined ? undefined : Number(virtualKeyCode));
@@ -964,16 +1194,18 @@ class FrameSession {
       return event;
     };
     if (type === "keyDown" || type === "rawKeyDown") {
-      target?.dispatchEvent(keyboardEvent("keydown"));
+      const shouldEdit = target?.dispatchEvent(keyboardEvent("keydown")) ?? true;
+      if (!shouldEdit) return;
       if (init.key === "Backspace") deleteBackward(document);
       if (type === "keyDown" && typeof params.text === "string" && params.text) {
-        insertText(document, params.text);
+        const shouldInsert = target?.dispatchEvent(keyboardEvent("keypress")) ?? true;
+        if (shouldInsert) insertText(document, params.text);
       }
     } else if (type === "keyUp") {
       target?.dispatchEvent(keyboardEvent("keyup"));
     } else {
-      target?.dispatchEvent(keyboardEvent("keypress"));
-      if (typeof params.text === "string" && params.text) {
+      const shouldEdit = target?.dispatchEvent(keyboardEvent("keypress")) ?? true;
+      if (shouldEdit && typeof params.text === "string" && params.text) {
         insertText(document, params.text);
       }
     }
@@ -1020,8 +1252,14 @@ class FrameSession {
     const document = this.backend.document;
     const view = document.defaultView;
     if (!view) return;
-    const target =
-      document.elementFromPoint(Number(params.x), Number(params.y)) ?? document.documentElement;
+    const x = Number(params.x);
+    const y = Number(params.y);
+    let target = document.elementFromPoint(x, y) ?? document.documentElement;
+    while (target.shadowRoot?.mode === "open") {
+      const shadowTarget = target.shadowRoot.elementFromPoint(x, y);
+      if (!shadowTarget || shadowTarget === target) break;
+      target = shadowTarget;
+    }
     if (!(target instanceof Element)) return;
     const modifiers = Number(params.modifiers ?? 0);
     const button = buttonName === "none" ? 0 : buttons.indexOf(buttonName) - 1;
@@ -1057,6 +1295,8 @@ class FrameSession {
     };
     const pointerInit: PointerEventInit = {
       ...init,
+      button: type === "mouseMoved" ? -1 : button,
+      detail: 0,
       pointerId: 1,
       pointerType,
       pressure: Number(params.force ?? 0),
@@ -1066,74 +1306,130 @@ class FrameSession {
       twist: Number(params.twist ?? 0),
       isPrimary: true,
     };
-    const dispatchPointer = (element: Element, eventType: string, bubbles = true): void => {
-      element.dispatchEvent(new view.PointerEvent(eventType, { ...pointerInit, bubbles }));
+    const dispatchPointer = (
+      element: Element,
+      eventType: string,
+      bubbles = true,
+      relatedTarget: Element | null = null,
+    ): boolean => {
+      return element.dispatchEvent(
+        new view.PointerEvent(eventType, { ...pointerInit, bubbles, relatedTarget }),
+      );
     };
     if (type === "mouseMoved") {
       if (this.hoveredElement !== target) {
         if (this.hoveredElement) {
-          dispatchPointer(this.hoveredElement, "pointerout");
-          dispatchPointer(this.hoveredElement, "pointerleave", false);
+          dispatchPointer(this.hoveredElement, "pointerout", true, target);
+          dispatchPointer(this.hoveredElement, "pointerleave", false, target);
         }
-        this.hoveredElement?.dispatchEvent(new view.MouseEvent("mouseout", init));
-        this.hoveredElement?.dispatchEvent(
-          new view.MouseEvent("mouseleave", { ...init, bubbles: false }),
-        );
-        dispatchPointer(target, "pointerover");
-        dispatchPointer(target, "pointerenter", false);
-        target.dispatchEvent(new view.MouseEvent("mouseover", init));
-        target.dispatchEvent(new view.MouseEvent("mouseenter", { ...init, bubbles: false }));
+        dispatchPointer(target, "pointerover", true, this.hoveredElement ?? null);
+        dispatchPointer(target, "pointerenter", false, this.hoveredElement ?? null);
+        if (!this.suppressCompatibilityMouse) {
+          this.hoveredElement?.dispatchEvent(
+            new view.MouseEvent("mouseout", { ...init, relatedTarget: target }),
+          );
+          this.hoveredElement?.dispatchEvent(
+            new view.MouseEvent("mouseleave", {
+              ...init,
+              bubbles: false,
+              relatedTarget: target,
+            }),
+          );
+          target.dispatchEvent(
+            new view.MouseEvent("mouseover", {
+              ...init,
+              relatedTarget: this.hoveredElement ?? null,
+            }),
+          );
+          target.dispatchEvent(
+            new view.MouseEvent("mouseenter", {
+              ...init,
+              bubbles: false,
+              relatedTarget: this.hoveredElement ?? null,
+            }),
+          );
+        }
         this.hoveredElement = target;
       }
       dispatchPointer(target, "pointermove");
-      target.dispatchEvent(new view.MouseEvent("mousemove", init));
+      if (!this.suppressCompatibilityMouse) {
+        target.dispatchEvent(new view.MouseEvent("mousemove", init));
+      }
       return;
     }
     if (type === "mousePressed") {
       this.pressedElement = target;
-      dispatchPointer(target, "pointerdown");
-      target.dispatchEvent(new view.MouseEvent("mousedown", init));
-      if (buttonName === "right") {
-        target.dispatchEvent(new view.MouseEvent("contextmenu", init));
+      const pointerAllowed = dispatchPointer(target, "pointerdown");
+      const disabledControl = target.closest(":disabled");
+      this.suppressCompatibilityMouse = !pointerAllowed || disabledControl !== null;
+      const shouldFocus =
+        !this.suppressCompatibilityMouse &&
+        target.dispatchEvent(new view.MouseEvent("mousedown", init));
+      const focusTarget = target.closest<HTMLElement>(
+        "button,input,select,textarea,a[href],summary,[tabindex],[contenteditable]",
+      );
+      if (
+        buttonName === "left" &&
+        shouldFocus &&
+        focusTarget &&
+        !focusTarget.matches(":disabled")
+      ) {
+        focusTarget.focus({ preventScroll: true });
+      }
+      if (buttonName === "right" && disabledControl === null) {
+        target.dispatchEvent(new view.PointerEvent("contextmenu", pointerInit));
       }
       return;
     }
     if (type === "mouseReleased") {
       dispatchPointer(target, "pointerup");
-      target.dispatchEvent(new view.MouseEvent("mouseup", init));
-      if (this.pressedElement === target) {
-        if (buttonName === "left") {
-          (target as HTMLElement).click();
-        } else if (buttonName !== "none" && buttonName !== "right") {
-          target.dispatchEvent(new view.MouseEvent("auxclick", init));
+      if (!this.suppressCompatibilityMouse) {
+        target.dispatchEvent(new view.MouseEvent("mouseup", init));
+      }
+      const clickTarget = this.pressedElement
+        ? nearestCommonAncestor(this.pressedElement, target)
+        : undefined;
+      const disabledControl = clickTarget?.closest(":disabled");
+      if (clickTarget) {
+        if (buttonName === "left" && !disabledControl) {
+          clickTarget.dispatchEvent(
+            new view.PointerEvent("click", {
+              ...pointerInit,
+              button,
+              buttons: activeButtons,
+              detail: Number(params.clickCount ?? 0),
+            }),
+          );
+        } else if (buttonName !== "none" && !disabledControl) {
+          clickTarget.dispatchEvent(
+            new view.PointerEvent("auxclick", {
+              ...pointerInit,
+              button,
+              buttons: activeButtons,
+              detail: Number(params.clickCount ?? 0),
+            }),
+          );
         }
-        const now = Date.now();
-        if (
-          (buttonName === "left" && Number(params.clickCount ?? 1) > 1) ||
-          (buttonName === "left" &&
-            this.lastClickElement === target &&
-            now - this.lastClickTime < 500)
-        ) {
-          target.dispatchEvent(new view.MouseEvent("dblclick", init));
-        }
-        if (buttonName === "left") {
-          this.lastClickElement = target;
-          this.lastClickTime = now;
+        if (buttonName === "left" && Number(params.clickCount ?? 1) === 2 && !disabledControl) {
+          clickTarget.dispatchEvent(new view.MouseEvent("dblclick", init));
         }
       }
       this.pressedElement = undefined;
+      this.suppressCompatibilityMouse = false;
       return;
     }
     if (type === "mouseWheel") {
-      target.dispatchEvent(
+      const wheelAllowed = target.dispatchEvent(
         new view.WheelEvent("wheel", {
           ...init,
           deltaX: Number(params.deltaX ?? 0),
           deltaY: Number(params.deltaY ?? 0),
         }),
       );
-      const scroller = scrollableAncestor(target);
-      scroller?.scrollBy?.(Number(params.deltaX ?? 0), Number(params.deltaY ?? 0));
+      if (wheelAllowed) {
+        const scroller = scrollableAncestor(target);
+        scroller?.scrollBy?.(Number(params.deltaX ?? 0), Number(params.deltaY ?? 0));
+      }
       return;
     }
     throw protocolError(CDP_INVALID_PARAMS, "Invalid parameters");
@@ -1141,7 +1437,10 @@ class FrameSession {
 
   private validateExecutionContext(params: Record<string, unknown>): void {
     if (params.contextId !== undefined && params.uniqueContextId !== undefined) {
-      throw protocolError(CDP_INVALID_PARAMS, "Invalid parameters");
+      throw protocolError(
+        CDP_INVALID_PARAMS,
+        "contextId and uniqueContextId are mutually exclusive",
+      );
     }
     if (
       params.contextId !== undefined &&
@@ -1153,7 +1452,12 @@ class FrameSession {
       params.uniqueContextId !== undefined &&
       params.uniqueContextId !== this.backend.executionContext().uniqueId
     ) {
-      throw new Error("Cannot find unique context with specified id");
+      throw protocolError(
+        CDP_INVALID_PARAMS,
+        isInt64Pair(String(params.uniqueContextId))
+          ? "uniqueContextId not found"
+          : "invalid uniqueContextId",
+      );
     }
   }
 
@@ -1182,21 +1486,24 @@ class FrameSession {
   private async evaluate(
     params: Record<string, unknown>,
   ): Promise<Protocol.Runtime.EvaluateResponse> {
-    this.validateExecutionContext({
-      contextId: params.contextId,
-      uniqueContextId: params.uniqueContextId,
-    });
     if (params.throwOnSideEffect) {
       return this.exceptionResult(new EvalError("Possible side-effect in debug-evaluate"), params);
     }
-    let settled: unknown;
+    let value: unknown;
     try {
       const view = this.backend.document.defaultView;
       if (!view) throw new Error("Execution context is unavailable");
-      const value = view.eval(String(params.expression));
-      settled = params.awaitPromise ? await value : value;
+      value = view.eval(String(params.expression));
     } catch (error) {
       return this.exceptionResult(error, params);
+    }
+    let settled = value;
+    if (params.awaitPromise) {
+      try {
+        settled = await value;
+      } catch (error) {
+        return this.exceptionResult(error, params, true);
+      }
     }
     return {
       result: this.objects.wrap(settled, {
@@ -1224,8 +1531,6 @@ class FrameSession {
         "Either objectId or executionContextId or uniqueContextId must be specified",
       );
     }
-    this.rejectPresentOptions(params, ["serializationOptions"]);
-    this.rejectTruthyOptions(params, ["silent", "generatePreview", "userGesture"]);
     this.validateExecutionContext({
       contextId: params.executionContextId,
       uniqueContextId: params.uniqueContextId,
@@ -1238,32 +1543,47 @@ class FrameSession {
     const args = ((params.arguments as Protocol.Runtime.CallArgument[] | undefined) ?? []).map(
       (argument) => this.objects.decodeArgument(argument),
     );
-
-    if (params.throwOnSideEffect) {
-      return this.exceptionResult(new EvalError("Possible side-effect in debug-evaluate"), params);
-    }
-    let candidate: unknown;
-    try {
-      candidate = view.eval(`(${String(params.functionDeclaration)})`);
-    } catch (error) {
-      return this.exceptionResult(error, params);
-    }
-    if (typeof candidate !== "function") {
-      throw new Error("Given expression does not evaluate to a function");
-    }
-    let settled: unknown;
-    try {
-      const fn = candidate as (this: unknown, ...args: unknown[]) => unknown;
-      const value = fn.apply(target, args);
-      settled = params.awaitPromise ? await value : value;
-    } catch (error) {
-      return this.exceptionResult(error, params);
-    }
     const inheritedGroup =
       params.objectGroup ??
       (params.objectId !== undefined
         ? this.objects.objectGroupName(String(params.objectId))
         : undefined);
+    const exceptionParams =
+      inheritedGroup === undefined ? params : { ...params, objectGroup: inheritedGroup };
+
+    this.rejectPresentOptions(params, ["serializationOptions"]);
+    this.rejectTruthyOptions(params, ["silent", "generatePreview", "userGesture"]);
+
+    if (params.throwOnSideEffect) {
+      return this.exceptionResult(
+        new EvalError("Possible side-effect in debug-evaluate"),
+        exceptionParams,
+      );
+    }
+    let candidate: unknown;
+    try {
+      candidate = view.eval(`(${String(params.functionDeclaration)})`);
+    } catch (error) {
+      return this.exceptionResult(error, exceptionParams);
+    }
+    if (typeof candidate !== "function") {
+      throw new Error("Given expression does not evaluate to a function");
+    }
+    let value: unknown;
+    try {
+      const fn = candidate as (this: unknown, ...args: unknown[]) => unknown;
+      value = fn.apply(target, args);
+    } catch (error) {
+      return this.exceptionResult(error, exceptionParams);
+    }
+    let settled = value;
+    if (params.awaitPromise) {
+      try {
+        settled = await value;
+      } catch (error) {
+        return this.exceptionResult(error, exceptionParams, true);
+      }
+    }
     return {
       result: this.objects.wrap(settled, {
         objectGroup: inheritedGroup as string | undefined,
@@ -1275,19 +1595,35 @@ class FrameSession {
   private exceptionResult(
     error: unknown,
     params: Record<string, unknown>,
+    inPromise = false,
   ): Protocol.Runtime.EvaluateResponse {
     const result = this.objects.wrap(error, {
       objectGroup: params.objectGroup as string | undefined,
+      returnByValue: inPromise && Boolean(params.returnByValue),
     });
+    const exception = this.objects.wrap(error, {
+      objectGroup: params.objectGroup as string | undefined,
+    });
+    let text = inPromise ? "Uncaught (in promise)" : "Uncaught";
+    const view = this.backend.document.defaultView;
+    try {
+      if (inPromise && view && error instanceof view.Error) {
+        const name = String((error as Error).name || "Error");
+        const message = String((error as Error).message || "");
+        text += ` ${name}${message ? `: ${message}` : ""}`;
+      }
+    } catch {
+      // Exotic rejected values keep Chromium's generic promise exception text.
+    }
     return {
       result,
       exceptionDetails: {
         exceptionId: this.nextExceptionId++,
-        text: "Uncaught",
+        text,
         lineNumber: 0,
         columnNumber: 0,
         executionContextId: this.backend.executionContext().id,
-        exception: result,
+        exception,
       },
     };
   }
@@ -1299,7 +1635,15 @@ class FrameSession {
       ancestry.push(current);
       if (current === this.backend.document) break;
     }
-    if (ancestry.at(-1) !== this.backend.document) return 0;
+    if (ancestry.at(-1) !== this.backend.document) {
+      const detachedRoot = ancestry.at(-1)!;
+      this.nodes.unbindSubtree(detachedRoot);
+      for (const detached of ancestry) this.detachedNodes.add(detached);
+      this.emit("DOM.setChildNodes", {
+        parentId: 0,
+        nodes: [this.serializeNode(detachedRoot, 0, true)],
+      });
+    }
 
     ancestry.reverse();
     for (let index = 0; index < ancestry.length - 1; index++) {
@@ -1318,11 +1662,36 @@ class FrameSession {
     return this.nodes.idForNode(node);
   }
 
+  private isContainerNode(node: Node): node is Document | DocumentFragment | Element {
+    return node instanceof Document || node instanceof DocumentFragment || node instanceof Element;
+  }
+
+  private materializeUnrequestedChildren(node: Node, depth: number, pierce: boolean): void {
+    if (depth === 0 || !this.isContainerNode(node)) return;
+    const nodeId = this.nodes.idForNode(node);
+    if (nodeId === 0) return;
+    const nextDepth = depth < 0 ? -1 : depth - 1;
+    if (!this.nodes.childrenWereRequested(node)) {
+      const nodes = this.visibleChildren(node).map((child) => {
+        const serialized = this.serializeNode(child, nextDepth, pierce);
+        serialized.parentId = nodeId;
+        return serialized;
+      });
+      this.nodes.markChildrenRequested(node);
+      this.emit("DOM.setChildNodes", { parentId: nodeId, nodes });
+      return;
+    }
+    for (const child of this.visibleChildren(node)) {
+      this.materializeUnrequestedChildren(child, nextDepth, pierce);
+    }
+  }
+
   private serializeNode(
     node: Node,
     depth: number,
     pierce: boolean,
     bind = true,
+    childrenOverride?: Node[],
   ): Protocol.DOM.Node {
     const nodeId = bind ? this.nodes.bind(node) : this.nodes.idForNode(node);
     const result: Protocol.DOM.Node = {
@@ -1331,7 +1700,7 @@ class FrameSession {
       nodeType: node.nodeType,
       nodeName: node.nodeName,
       localName: node instanceof Element ? node.localName : "",
-      nodeValue: node.nodeValue ?? "",
+      nodeValue: protocolNodeValue(node.nodeValue ?? ""),
     };
 
     if (node instanceof Document) {
@@ -1345,6 +1714,9 @@ class FrameSession {
     } else if (node instanceof ShadowRoot) {
       result.shadowRootType = node.mode;
     } else if (node instanceof Element) {
+      if (node === this.backend.document.documentElement) {
+        result.frameId = "icdp-frame";
+      }
       result.nodeName =
         node.namespaceURI === "http://www.w3.org/1999/xhtml"
           ? node.nodeName.toUpperCase()
@@ -1362,11 +1734,16 @@ class FrameSession {
         ];
       }
       if (node instanceof HTMLTemplateElement) {
-        result.templateContent = this.serializeNode(node.content, 0, pierce, bind);
+        result.templateContent = this.serializeNode(
+          this.backend.templateContent(node),
+          0,
+          pierce,
+          bind,
+        );
       }
     }
 
-    const children = this.visibleChildren(node);
+    const children = childrenOverride ?? this.visibleChildren(node);
     if (node instanceof Document || node instanceof DocumentFragment || node instanceof Element) {
       result.childNodeCount = children.length;
       const forceChildren =
@@ -1393,8 +1770,129 @@ class FrameSession {
     return (
       this.includeWhitespace ||
       node.nodeType !== node.TEXT_NODE ||
-      (node.nodeValue ?? "").trim() !== ""
+      textNodeIsVisible(node.nodeValue ?? "")
     );
+  }
+
+  private nodeIsVisibleAtRecord(node: Node, index: number, records: MutationRecord[]): boolean {
+    return (
+      this.includeWhitespace ||
+      node.nodeType !== node.TEXT_NODE ||
+      textNodeIsVisible(this.characterDataAtRecord(node, index, records))
+    );
+  }
+
+  private characterDataAtRecord(node: Node, index: number, records: MutationRecord[]): string {
+    const nextRecord = records
+      .slice(index + 1)
+      .find((candidate) => candidate.type === "characterData" && candidate.target === node);
+    return nextRecord ? (nextRecord.oldValue ?? "") : (node.nodeValue ?? "");
+  }
+
+  private serializeMutationNode(
+    node: Node,
+    index: number,
+    records: MutationRecord[],
+  ): Protocol.DOM.Node {
+    const children = this.visibleChildrenAtRecord(node, index, records);
+    const serialized = this.serializeNode(node, 0, false, true, children);
+    if (node.nodeType === node.TEXT_NODE) {
+      serialized.nodeValue = protocolNodeValue(this.characterDataAtRecord(node, index, records));
+    } else if (node instanceof Element) {
+      for (const [childIndex, child] of children.entries()) {
+        if (child.nodeType === child.TEXT_NODE && serialized.children?.[childIndex]) {
+          serialized.children[childIndex]!.nodeValue = protocolNodeValue(
+            this.characterDataAtRecord(child, index, records),
+          );
+        }
+      }
+      const attributes = new Map<string, { name: string; value: string }>();
+      for (const attribute of Array.from(node.attributes)) {
+        attributes.set(`${attribute.namespaceURI ?? ""}\0${attribute.localName}`, {
+          name: attribute.name,
+          value: attribute.value,
+        });
+      }
+      for (let recordIndex = records.length - 1; recordIndex > index; recordIndex--) {
+        const record = records[recordIndex]!;
+        if (record.type !== "attributes" || record.target !== node || !record.attributeName) {
+          continue;
+        }
+        const key = `${record.attributeNamespace ?? ""}\0${record.attributeName}`;
+        if (record.oldValue === null) {
+          attributes.delete(key);
+        } else {
+          attributes.set(key, {
+            name: mutationAttributeName(record, node),
+            value: record.oldValue,
+          });
+        }
+      }
+      serialized.attributes = Array.from(attributes.values()).flatMap(({ name, value }) => [
+        name,
+        value,
+      ]);
+    }
+    return serialized;
+  }
+
+  private childrenAtRecord(node: Node, index: number, records: MutationRecord[]): Node[] {
+    const children: Node[] = Array.from(node.childNodes);
+    for (let recordIndex = records.length - 1; recordIndex > index; recordIndex--) {
+      const record = records[recordIndex]!;
+      if (record.type !== "childList" || record.target !== node) continue;
+
+      for (const added of Array.from(record.addedNodes)) {
+        const addedIndex = children.indexOf(added);
+        if (addedIndex !== -1) children.splice(addedIndex, 1);
+      }
+
+      const removed = Array.from(record.removedNodes);
+      if (removed.length === 0) continue;
+      const nextIndex = record.nextSibling ? children.indexOf(record.nextSibling) : -1;
+      const previousIndex = record.previousSibling ? children.indexOf(record.previousSibling) : -1;
+      const insertionIndex =
+        nextIndex !== -1 ? nextIndex : previousIndex !== -1 ? previousIndex + 1 : 0;
+      children.splice(insertionIndex, 0, ...removed);
+    }
+    return children;
+  }
+
+  private visibleChildrenAtRecord(node: Node, index: number, records: MutationRecord[]): Node[] {
+    return this.childrenAtRecord(node, index, records).filter((child) =>
+      this.nodeIsVisibleAtRecord(child, index, records),
+    );
+  }
+
+  private unbindMutationSubtree(node: Node, index: number, records: MutationRecord[]): void {
+    for (const child of this.childrenAtRecord(node, index, records)) {
+      this.unbindMutationSubtree(child, index, records);
+    }
+    const shadowRoot = node.nodeType === node.ELEMENT_NODE ? (node as Element).shadowRoot : null;
+    if (shadowRoot) {
+      this.unbindMutationSubtree(shadowRoot, index, records);
+    }
+    if (node.nodeType === node.ELEMENT_NODE && (node as Element).localName === "template") {
+      this.unbindMutationSubtree(
+        this.backend.templateContent(node as HTMLTemplateElement),
+        index,
+        records,
+      );
+    }
+    this.nodes.unbindNode(node);
+  }
+
+  private previousVisibleNode(
+    node: Node,
+    siblings: Node[],
+    index: number,
+    records: MutationRecord[],
+  ): Node | null {
+    for (let siblingIndex = siblings.indexOf(node) - 1; siblingIndex >= 0; siblingIndex--) {
+      const sibling = siblings[siblingIndex]!;
+      if (this.nodeIsVisibleAtRecord(sibling, index, records)) return sibling;
+    }
+    return null;
   }
 
   private visibleChildren(node: Node): Node[] {
@@ -1416,12 +1914,30 @@ class FrameSession {
   }
 }
 
+function composedParent(element: Element): Element | null {
+  if (element.parentElement) return element.parentElement;
+  const root = element.getRootNode();
+  const view = element.ownerDocument.defaultView;
+  return view && root instanceof view.ShadowRoot ? root.host : null;
+}
+
+function nearestCommonAncestor(first: Element, second: Element): Element | undefined {
+  const secondAncestors = new Set<Element>();
+  for (let current: Element | null = second; current; current = composedParent(current)) {
+    secondAncestors.add(current);
+  }
+  for (let current: Element | null = first; current; current = composedParent(current)) {
+    if (secondAncestors.has(current)) return current;
+  }
+  return undefined;
+}
+
 function textControl(document: Document): HTMLInputElement | HTMLTextAreaElement | undefined {
   const active = document.activeElement;
   if (active instanceof HTMLTextAreaElement) return active;
   if (
     active instanceof HTMLInputElement &&
-    ["", "text", "search", "tel", "url", "password", "email"].includes(active.type)
+    ["", "text", "search", "tel", "url", "password", "email", "number"].includes(active.type)
   ) {
     return active;
   }
@@ -1436,58 +1952,92 @@ function setNativeValue(element: HTMLInputElement | HTMLTextAreaElement, value: 
   Object.getOwnPropertyDescriptor(prototype, "value")?.set?.call(element, value);
 }
 
+function dispatchInputEvent(
+  target: HTMLElement,
+  type: "beforeinput" | "input",
+  inputType: string,
+  data: string | null = null,
+): boolean {
+  const InputEventConstructor = target.ownerDocument.defaultView?.InputEvent ?? InputEvent;
+  return target.dispatchEvent(
+    new InputEventConstructor(type, {
+      bubbles: true,
+      cancelable: type === "beforeinput",
+      composed: true,
+      data,
+      inputType,
+    }),
+  );
+}
+
 function insertText(document: Document, text: string): void {
   const control = textControl(document);
   if (control) {
+    if (!dispatchInputEvent(control, "beforeinput", "insertText", text)) return;
+    if (typeof document.execCommand === "function") {
+      document.execCommand("insertText", false, text);
+      return;
+    }
+    if (control.readOnly || control.disabled) return;
     const start = control.selectionStart ?? control.value.length;
     const end = control.selectionEnd ?? control.value.length;
-    setNativeValue(control, `${control.value.slice(0, start)}${text}${control.value.slice(end)}`);
+    const capacity =
+      control.maxLength < 0
+        ? text.length
+        : Math.max(0, control.maxLength - (control.value.length - (end - start)));
+    const inserted = text.slice(0, capacity);
+    if (!inserted) return;
+    setNativeValue(
+      control,
+      `${control.value.slice(0, start)}${inserted}${control.value.slice(end)}`,
+    );
     try {
-      control.setSelectionRange(start + text.length, start + text.length);
+      control.setSelectionRange(start + inserted.length, start + inserted.length);
     } catch {
       // Email and some other text-like input types do not expose a selection
       // range even though Chromium can insert text into them.
     }
-    control.dispatchEvent(
-      new InputEvent("input", {
-        bubbles: true,
-        composed: true,
-        data: text,
-        inputType: "insertText",
-      }),
-    );
+    dispatchInputEvent(control, "input", "insertText", inserted);
     return;
   }
   const active = document.activeElement;
   if (active instanceof HTMLElement && active.isContentEditable) {
+    if (!dispatchInputEvent(active, "beforeinput", "insertText", text)) return;
     document.execCommand("insertText", false, text);
   }
+}
+
+function previousGraphemeBoundary(value: string, position: number): number {
+  let previous = 0;
+  for (const segment of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(
+    value.slice(0, position),
+  )) {
+    previous = segment.index;
+  }
+  return previous;
 }
 
 function deleteBackward(document: Document): void {
   const control = textControl(document);
   if (control) {
+    if (control.readOnly || control.disabled) return;
     const start = control.selectionStart ?? control.value.length;
     const end = control.selectionEnd ?? control.value.length;
     if (start === 0 && end === 0) return;
-    const nextStart = start === end ? Math.max(0, start - 1) : start;
+    if (!dispatchInputEvent(control, "beforeinput", "deleteContentBackward")) return;
+    const nextStart = start === end ? previousGraphemeBoundary(control.value, start) : start;
     setNativeValue(control, `${control.value.slice(0, nextStart)}${control.value.slice(end)}`);
     try {
       control.setSelectionRange(nextStart, nextStart);
     } catch {
       // See insertText: some text-like input types have no selection API.
     }
-    control.dispatchEvent(
-      new InputEvent("input", {
-        bubbles: true,
-        composed: true,
-        inputType: "deleteContentBackward",
-      }),
-    );
+    dispatchInputEvent(control, "input", "deleteContentBackward");
     return;
   }
   const active = document.activeElement;
   if (active instanceof HTMLElement && active.isContentEditable) {
+    if (!dispatchInputEvent(active, "beforeinput", "deleteContentBackward")) return;
     document.execCommand("delete", false);
   }
 }
@@ -1587,6 +2137,31 @@ function boxModel(element: Element): Protocol.DOM.BoxModel {
   };
 }
 
+function boxModelForNode(node: Node): Protocol.DOM.BoxModel {
+  if (!node.isConnected) throw new Error("Could not compute box model.");
+  if (node instanceof Text) {
+    const range = node.ownerDocument.createRange();
+    range.selectNodeContents(node);
+    const rect = range.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) {
+      throw new Error("Could not compute box model.");
+    }
+    const quad = insetQuad(rect, 0, 0, 0, 0);
+    return {
+      content: quad,
+      padding: [...quad],
+      border: [...quad],
+      margin: [...quad],
+      width: Math.ceil(rect.right) - Math.floor(rect.left),
+      height: Math.ceil(rect.bottom) - Math.floor(rect.top),
+    };
+  }
+  if (!(node instanceof Element) || getComputedStyle(node).display === "none") {
+    throw new Error("Could not compute box model.");
+  }
+  return boxModel(node);
+}
+
 export class FrameBackend {
   readonly backendNodes: DomRegistry;
   private readonly sessions = new Map<string, FrameSession>();
@@ -1617,11 +2192,14 @@ export class FrameBackend {
   private domObserver: MutationObserver | undefined;
   private domObservedRoots = new WeakSet<Node>();
   private restoreAttachShadow: (() => void) | undefined;
+  private readonly restoreDomMutationBoundaries: Array<() => void> = [];
+  private templateContentGetter: ((template: HTMLTemplateElement) => DocumentFragment) | undefined;
   private networkObserver: NetworkObserver | undefined;
   readonly document: Document;
   private loaderId: string;
   private readonly contextId = allocateExecutionContextId();
-  private readonly contextUniqueId = `icdp-context-${Math.random().toString(36).slice(2)}`;
+  private readonly contextUniqueId = allocateUniqueExecutionContextId(this.contextId);
+  private readonly objectScope = allocateUniqueExecutionContextId(this.contextId);
 
   constructor(options: FrameBackendOptions) {
     this.document = options.document;
@@ -1814,7 +2392,7 @@ export class FrameBackend {
       if (!this.sameDocumentNavigation) return;
       const { type, url } = this.sameDocumentNavigation;
       this.sameDocumentNavigation = undefined;
-      if (!navigation.currentEntry?.sameDocument || navigation.currentEntry.url !== url) return;
+      if (navigation.currentEntry?.url !== url) return;
       this.clearPendingLoaderId();
       emitSameDocumentNavigation(type, url);
     });
@@ -1896,6 +2474,8 @@ export class FrameBackend {
       this.domObservedRoots = new WeakSet();
       this.restoreAttachShadow?.();
       this.restoreAttachShadow = undefined;
+      for (const restore of this.restoreDomMutationBoundaries.splice(0).toReversed()) restore();
+      this.templateContentGetter = undefined;
       return;
     }
     if (this.domObserver) {
@@ -1904,21 +2484,20 @@ export class FrameBackend {
     }
     const view = this.document.defaultView;
     if (!view) throw new Error("DOM observation is unavailable");
-    this.domObserver = new view.MutationObserver((records) => {
-      for (const record of records) {
-        for (const added of Array.from(record.addedNodes)) {
-          if (added instanceof view.Element) this.observeOpenShadowRoots(added);
-        }
-      }
-      for (const session of this.sessions.values()) {
-        session.domMutations(records);
-      }
-    });
+    this.domObserver = new view.MutationObserver((records) => this.deliverDomMutations(records));
+    this.installDomMutationBoundaries(view);
     this.observeOpenShadowRoots(this.document);
     const prototype = view.Element.prototype;
     const original = prototype.attachShadow;
-    const observeOpenRoot = (root: ShadowRoot): void => this.observeOpenShadowRoots(root);
+    const flushDomMutations = (): void => this.flushDomMutations();
+    const observeOpenRoot = (root: ShadowRoot): void => {
+      for (const session of this.sessions.values()) {
+        session.domShadowRootPushed(root.host, root);
+      }
+      this.observeOpenShadowRoots(root);
+    };
     const wrapped = function (this: Element, init: ShadowRootInit): ShadowRoot {
+      flushDomMutations();
       const root = original.call(this, init);
       if (root.mode === "open") observeOpenRoot(root);
       return root;
@@ -1934,16 +2513,142 @@ export class FrameBackend {
     }
   }
 
-  private observeOpenShadowRoots(root: Document | ShadowRoot | Element): void {
+  private deliverDomMutations(records: MutationRecord[]): void {
+    if (records.length === 0) return;
+    const view = this.document.defaultView;
+    if (!view) return;
+    for (const record of records) {
+      for (const added of Array.from(record.addedNodes)) {
+        if (added instanceof view.Element) this.observeOpenShadowRoots(added);
+      }
+    }
+    for (const session of this.sessions.values()) {
+      session.domMutations(records);
+    }
+  }
+
+  private flushDomMutations(): void {
+    const records = this.domObserver?.takeRecords();
+    if (records?.length) this.deliverDomMutations(records);
+  }
+
+  private installDomMutationBoundaries(view: Window & typeof globalThis): void {
+    const templatePrototype = view.HTMLTemplateElement.prototype;
+    const contentDescriptor = Object.getOwnPropertyDescriptor(templatePrototype, "content");
+    const rawContentGetter = contentDescriptor?.get;
+    if (rawContentGetter) {
+      this.templateContentGetter = (template) =>
+        Reflect.apply(rawContentGetter, template, []) as DocumentFragment;
+    }
+
+    let innerHtmlPrototype: object | null = templatePrototype;
+    let innerHtmlDescriptor: PropertyDescriptor | undefined;
+    while (innerHtmlPrototype && !innerHtmlDescriptor) {
+      innerHtmlDescriptor = Object.getOwnPropertyDescriptor(innerHtmlPrototype, "innerHTML");
+      innerHtmlPrototype = Object.getPrototypeOf(innerHtmlPrototype) as object | null;
+    }
+    const previousOwnInnerHtml = Object.getOwnPropertyDescriptor(templatePrototype, "innerHTML");
+    const rawInnerHtmlGetter = innerHtmlDescriptor?.get;
+    const rawInnerHtmlSetter = innerHtmlDescriptor?.set;
+    const flushDomMutations = (): void => this.flushDomMutations();
+    const observeRoot = (root: DocumentFragment): void => this.observeOpenShadowRoots(root);
+    const templateContent = (template: HTMLTemplateElement): DocumentFragment =>
+      this.templateContent(template);
+
+    if (rawContentGetter && contentDescriptor) {
+      const wrappedContentGetter = function (this: HTMLTemplateElement): DocumentFragment {
+        const content = Reflect.apply(rawContentGetter, this, []) as DocumentFragment;
+        flushDomMutations();
+        observeRoot(content);
+        return content;
+      };
+      try {
+        Object.defineProperty(templatePrototype, "content", {
+          ...contentDescriptor,
+          get: wrappedContentGetter,
+        });
+        this.restoreDomMutationBoundaries.push(() => {
+          const current = Object.getOwnPropertyDescriptor(templatePrototype, "content");
+          if (current?.get === wrappedContentGetter) {
+            Object.defineProperty(templatePrototype, "content", contentDescriptor);
+          }
+        });
+      } catch {}
+    }
+
+    if (rawInnerHtmlGetter && rawInnerHtmlSetter) {
+      const wrappedInnerHtmlSetter = function (this: HTMLTemplateElement, value: string): void {
+        flushDomMutations();
+        const content = templateContent(this);
+        observeRoot(content);
+        Reflect.apply(rawInnerHtmlSetter, this, [value]);
+      };
+      try {
+        Object.defineProperty(templatePrototype, "innerHTML", {
+          configurable: innerHtmlDescriptor?.configurable ?? true,
+          enumerable: innerHtmlDescriptor?.enumerable ?? true,
+          get(this: HTMLTemplateElement) {
+            return Reflect.apply(rawInnerHtmlGetter, this, []) as string;
+          },
+          set: wrappedInnerHtmlSetter,
+        });
+        this.restoreDomMutationBoundaries.push(() => {
+          const current = Object.getOwnPropertyDescriptor(templatePrototype, "innerHTML");
+          if (current?.set !== wrappedInnerHtmlSetter) return;
+          if (previousOwnInnerHtml) {
+            Object.defineProperty(templatePrototype, "innerHTML", previousOwnInnerHtml);
+          } else {
+            delete (templatePrototype as unknown as Record<string, unknown>).innerHTML;
+          }
+        });
+      } catch {}
+    }
+
+    const patchFlushBoundary = (prototype: object, name: string): void => {
+      const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
+      const original = descriptor?.value;
+      if (typeof original !== "function" || !descriptor) return;
+      const wrapped = function (this: unknown, ...args: unknown[]): unknown {
+        flushDomMutations();
+        return Reflect.apply(original, this, args);
+      };
+      try {
+        Object.defineProperty(prototype, name, { ...descriptor, value: wrapped });
+        this.restoreDomMutationBoundaries.push(() => {
+          const current = Object.getOwnPropertyDescriptor(prototype, name);
+          if (current?.value === wrapped) Object.defineProperty(prototype, name, descriptor);
+        });
+      } catch {}
+    };
+    for (const name of [
+      "removeAttribute",
+      "removeAttributeNS",
+      "removeAttributeNode",
+      "toggleAttribute",
+    ]) {
+      patchFlushBoundary(view.Element.prototype, name);
+    }
+    for (const name of ["removeNamedItem", "removeNamedItemNS"]) {
+      patchFlushBoundary(view.NamedNodeMap.prototype, name);
+    }
+  }
+
+  templateContent(template: HTMLTemplateElement): DocumentFragment {
+    return this.templateContentGetter?.(template) ?? template.content;
+  }
+
+  private observeOpenShadowRoots(root: Document | DocumentFragment | Element): void {
     if (!this.domObserver) return;
     if (
-      (root instanceof Document || root instanceof ShadowRoot) &&
+      (root instanceof Document || root instanceof DocumentFragment) &&
       !this.domObservedRoots.has(root)
     ) {
       this.domObservedRoots.add(root);
       this.domObserver.observe(root, {
         attributes: true,
+        attributeOldValue: true,
         characterData: true,
+        characterDataOldValue: true,
         childList: true,
         subtree: true,
       });
@@ -1955,6 +2660,9 @@ export class FrameBackend {
     for (const element of elements) {
       if (element.shadowRoot?.mode === "open") {
         this.observeOpenShadowRoots(element.shadowRoot);
+      }
+      if (element instanceof HTMLTemplateElement) {
+        this.observeOpenShadowRoots(this.templateContent(element));
       }
     }
   }
@@ -2012,6 +2720,10 @@ export class FrameBackend {
     };
   }
 
+  remoteObjectScope(): string {
+    return this.objectScope;
+  }
+
   navigate(url: string): string | undefined {
     const current = new URL(this.document.URL);
     const next = new URL(url);
@@ -2037,15 +2749,33 @@ export class FrameBackend {
 
   pageFrame(): Protocol.Page.Frame {
     const view = this.document.defaultView;
+    const documentUrl = this.document.URL;
+    const url = new URL(documentUrl);
+    const fragmentStart = documentUrl.indexOf("#");
+    const urlFragment = fragmentStart < 0 ? undefined : documentUrl.slice(fragmentStart);
+    url.hash = "";
+    const trustworthyOrigin =
+      url.protocol === "https:" ||
+      url.protocol === "wss:" ||
+      (view !== null && isLocalhost(view.location.hostname));
+    const localhost = view !== null && isLocalhost(view.location.hostname);
     return {
       id: "icdp-frame",
       loaderId: this.loaderId,
-      url: this.document.URL,
+      url: url.href,
+      ...(urlFragment === undefined ? {} : { urlFragment }),
       domainAndRegistry: "",
-      securityOrigin: view?.location.origin ?? "",
+      securityOrigin: url.protocol === "data:" ? "://" : (view?.location.origin ?? ""),
+      securityOriginDetails: { isLocalhost: localhost },
       mimeType: this.document.contentType || "text/html",
-      secureContextType: view?.isSecureContext ? "Secure" : "InsecureScheme",
-      crossOriginIsolatedContextType: "NotIsolated",
+      secureContextType: view?.isSecureContext
+        ? isLocalhost(view.location.hostname)
+          ? "SecureLocalhost"
+          : "Secure"
+        : trustworthyOrigin
+          ? "InsecureAncestor"
+          : "InsecureScheme",
+      crossOriginIsolatedContextType: view?.crossOriginIsolated ? "Isolated" : "NotIsolated",
       gatedAPIFeatures: [],
     };
   }
@@ -2071,6 +2801,8 @@ export class FrameBackend {
         result: result ?? {},
       });
     } catch (error) {
+      const data =
+        typeof error === "object" && error !== null && "data" in error ? error.data : undefined;
       this.send({
         kind: "response",
         sessionId: command.sessionId,
@@ -2084,6 +2816,7 @@ export class FrameBackend {
               ? error.code
               : CDP_SERVER_ERROR,
           message: error instanceof Error ? error.message : String(error),
+          ...(data === undefined ? {} : { data }),
         },
       });
     }

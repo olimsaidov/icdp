@@ -55,7 +55,7 @@ describe("Network and navigation through a real Chromium client", () => {
     const frameTree = await harness.icdp.send("Page.getFrameTree");
     expect(request.params).toMatchObject({
       loaderId: frameTree.frameTree.frame.loaderId,
-      documentURL: `${harness.appOrigin}/`,
+      documentURL: frameTree.frameTree.frame.url,
       initiator: { type: "script" },
       redirectHasExtraInfo: false,
       type: "Fetch",
@@ -191,6 +191,39 @@ describe("Network and navigation through a real Chromium client", () => {
       errorText: expect.any(String),
     });
     expect(failed.params.errorText.length).toBeGreaterThan(0);
+  });
+
+  test("emits no Network events when fetch starts with an aborted effective signal", async () => {
+    const start = harness.icdp.events.length;
+    const initSignalUrl = `${harness.appOrigin}/api/text?case=aborted-init`;
+    const requestSignalUrl = `${harness.appOrigin}/api/text?case=aborted-request`;
+
+    expect(
+      await harness.evaluate(`
+        Promise.all(
+          [
+            [${JSON.stringify(initSignalUrl)}, false],
+            [${JSON.stringify(requestSignalUrl)}, true],
+          ].map(async ([url, useRequest]) => {
+            const controller = new AbortController();
+            controller.abort();
+            const input = useRequest ? new Request(url, { signal: controller.signal }) : url;
+            const init = useRequest ? undefined : { signal: controller.signal };
+            return fetch(input, init).then(
+              () => "resolved",
+              (error) => error.name,
+            );
+          }),
+        ).then(async (results) => {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          return results;
+        })
+      `),
+    ).toEqual(["AbortError", "AbortError"]);
+
+    expect(
+      harness.icdp.events.slice(start).filter((event) => event.method.startsWith("Network.")),
+    ).toEqual([]);
   });
 
   test("reports the observable final response when Fetch follows a redirect", async () => {

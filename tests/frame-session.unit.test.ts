@@ -112,7 +112,11 @@ test("required command parameters use Chromium's invalid-params response", async
       kind: "response",
       sessionId: "session-a",
       id: 7,
-      error: { code: -32602, message: "Invalid parameters" },
+      error: {
+        code: -32602,
+        message: "Invalid parameters",
+        data: "Failed to deserialize params.selector - BINDINGS: mandatory field missing at position 16",
+      },
     },
   ]);
 });
@@ -144,12 +148,16 @@ test.each([
   });
 
   expect(messages).toEqual([
-    {
+    expect.objectContaining({
       kind: "response",
       sessionId: "session-a",
       id: 71,
-      error: { code: -32602, message: "Invalid parameters" },
-    },
+      error: expect.objectContaining({
+        code: -32602,
+        message: "Invalid parameters",
+        data: expect.stringMatching(/^Failed to deserialize params\./),
+      }),
+    }),
   ]);
 });
 
@@ -829,6 +837,7 @@ test("a restored Page domain reports the replacement frame navigation", () => {
         url: expect.any(String),
         domainAndRegistry: "",
         securityOrigin: expect.any(String),
+        securityOriginDetails: { isLocalhost: true },
         mimeType: "text/html",
         secureContextType: expect.any(String),
         crossOriginIsolatedContextType: "NotIsolated",
@@ -1381,10 +1390,58 @@ test("Input.dispatchMouseEvent derives DOM button state and right-click order", 
     { type: "mousedown", button: 2, buttons: 2, shiftKey: false },
     { type: "contextmenu", button: 2, buttons: 2, shiftKey: false },
     { type: "mouseup", button: 2, buttons: 0, shiftKey: false },
+    { type: "auxclick", button: 2, buttons: 0, shiftKey: false },
     { type: "mousedown", button: 3, buttons: 8, shiftKey: false },
     { type: "mousedown", button: 4, buttons: 24, shiftKey: false },
     { type: "wheel", button: 0, buttons: 0, shiftKey: false },
   ]);
+});
+
+test("Input.dispatchMouseEvent honors canceled pointer compatibility and wheel scrolling", async () => {
+  document.body.innerHTML = "<button>Target</button>";
+  const button = document.querySelector("button")!;
+  button.style.overflow = "auto";
+  Object.defineProperty(document, "elementFromPoint", {
+    configurable: true,
+    value: () => button,
+  });
+  const events: string[] = [];
+  for (const type of [
+    "pointerdown",
+    "mousedown",
+    "contextmenu",
+    "pointerup",
+    "mouseup",
+    "auxclick",
+  ]) {
+    button.addEventListener(type, (event) => {
+      events.push(type);
+      if (type === "pointerdown") event.preventDefault();
+    });
+  }
+  const scrollBy = vi.fn();
+  Object.defineProperty(button, "scrollBy", { configurable: true, value: scrollBy });
+  button.addEventListener("wheel", (event) => event.preventDefault());
+
+  const backend = new FrameBackend({ document, send: () => {} });
+  backend.attach("session-a", []);
+  let id = 190;
+  const dispatch = async (params: Record<string, unknown>) => {
+    await backend.command({
+      kind: "command",
+      sessionId: "session-a",
+      id: id++,
+      method: "Input.dispatchMouseEvent",
+      params: { x: 10, y: 10, ...params },
+    });
+  };
+
+  await dispatch({ type: "mousePressed", button: "right", buttons: 2 });
+  await dispatch({ type: "mouseReleased", button: "right", buttons: 0 });
+  await dispatch({ type: "mouseWheel", deltaX: 5, deltaY: 10 });
+
+  expect(events).toEqual(["pointerdown", "contextmenu", "pointerup", "auxclick"]);
+  expect(scrollBy).not.toHaveBeenCalled();
 });
 
 test("Input.dispatchMouseEvent validates Chromium mouse parameters", async () => {
@@ -1706,7 +1763,11 @@ test("commands reject meaningful options the in-page backend cannot honor", asyn
       { expression: "1", allowUnsafeEvalBlockedByCSP: true },
       "allowUnsafeEvalBlockedByCSP",
     ],
-    ["Runtime.evaluate", { expression: "1", serializationOptions: {} }, "serializationOptions"],
+    [
+      "Runtime.evaluate",
+      { expression: "1", serializationOptions: { serialization: "json" } },
+      "serializationOptions",
+    ],
     [
       "Runtime.callFunctionOn",
       {
@@ -1739,7 +1800,7 @@ test("commands reject meaningful options the in-page backend cannot honor", asyn
       {
         executionContextId: backend.executionContext().id,
         functionDeclaration: "() => 1",
-        serializationOptions: {},
+        serializationOptions: { serialization: "json" },
       },
       "serializationOptions",
     ],
@@ -1934,7 +1995,7 @@ test("Runtime.callFunctionOn rejects unknown receiver and argument handles as pr
   for (const id of [251, 252]) {
     expect(messages.find((message) => message.id === id)?.error).toEqual({
       code: -32000,
-      message: "Could not find object with given id",
+      message: "Invalid remote object id",
     });
   }
 });
@@ -2138,7 +2199,7 @@ test("Runtime assimilates thenables and rejects ambiguous execution contexts", a
   });
   expect(messages.find((message) => message.id === 262)?.error).toEqual({
     code: -32602,
-    message: "Invalid parameters",
+    message: "contextId and uniqueContextId are mutually exclusive",
   });
 });
 
@@ -2188,9 +2249,10 @@ test("Runtime.callFunctionOn validates CallArgument objects and follows V8 prece
   });
 
   for (const id of [267, 268]) {
-    expect(messages.find((message) => message.id === id)?.error).toEqual({
+    expect(messages.find((message) => message.id === id)?.error).toMatchObject({
       code: -32602,
       message: "Invalid parameters",
+      data: expect.stringContaining("Failed to deserialize params.arguments"),
     });
   }
   expect(messages.find((message) => message.id === 269)?.result.result).toEqual({
