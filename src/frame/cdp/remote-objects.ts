@@ -57,6 +57,7 @@ type Getter = (this: unknown) => unknown;
 const getPrototypeOf = Object.getPrototypeOf;
 const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 const functionToString = Function.prototype.toString;
+const objectToString = Object.prototype.toString;
 const functionHasInstance = Function.prototype[Symbol.hasInstance];
 const mapSize = getOwnPropertyDescriptor(Map.prototype, "size")?.get;
 const setSize = getOwnPropertyDescriptor(Set.prototype, "size")?.get;
@@ -200,7 +201,29 @@ function isErrorObject(value: object): boolean {
       return false;
     }
   }
-  return isIntrinsicInstance(value, errorConstructor);
+
+  let hasToStringTag = false;
+  try {
+    for (let owner: object | null = value; owner; owner = getPrototypeOf(owner) as object | null) {
+      if (getOwnPropertyDescriptor(owner, Symbol.toStringTag)) {
+        hasToStringTag = true;
+        break;
+      }
+    }
+  } catch {
+    return false;
+  }
+  if (!hasToStringTag) {
+    return callMethod<string>(objectToString, value) === "[object Error]";
+  }
+  try {
+    return (
+      getOwnPropertyDescriptor(value, "stack") !== undefined &&
+      (isIntrinsicInstance(value, errorConstructor) || hasNativeConstructor(value, "Error"))
+    );
+  } catch {
+    return false;
+  }
 }
 
 function constructorName(value: object, fallback: string): string {

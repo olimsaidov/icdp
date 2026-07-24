@@ -31,9 +31,9 @@ The browser version descriptor a [Client](/explanation/concepts) reads to discov
 
 ```json
 {
-  "Browser": "icdp/0.5.0",
+  "Browser": "icdp/0.5.1",
   "Protocol-Version": "1.3",
-  "User-Agent": "icdp/0.5.0",
+  "User-Agent": "icdp/0.5.1",
   "V8-Version": "synthetic",
   "WebKit-Version": "synthetic",
   "webSocketDebuggerUrl": "ws://127.0.0.1:9229/devtools/browser"
@@ -42,7 +42,7 @@ The browser version descriptor a [Client](/explanation/concepts) reads to discov
 
 | Field | Type | Value |
 | --- | --- | --- |
-| `Browser` | string | The `product` string (default `icdp/0.5.0`). |
+| `Browser` | string | The `product` string (default `icdp/0.5.1`). |
 | `Protocol-Version` | string | `"1.3"`, fixed. |
 | `User-Agent` | string | The `product` string. |
 | `V8-Version` | string | `"synthetic"`, fixed. |

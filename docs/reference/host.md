@@ -32,7 +32,7 @@ type CreateTargetParams = {
 } & Record<string, unknown>;
 ```
 
-`window` defaults to the global `window`. `product` defaults to `icdp/0.5.0`
+`window` defaults to the global `window`. `product` defaults to `icdp/0.5.1`
 for `Browser.getVersion`. A bare `WindowLike` is still accepted as the
 constructor argument.
 

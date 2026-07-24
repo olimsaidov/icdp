@@ -51,7 +51,7 @@ export class RelayCore {
   private readonly targets = new Map<string, TargetSummary>();
 
   constructor(options: RelayCoreOptions = {}) {
-    this.product = options.product ?? "icdp/0.5.0";
+    this.product = options.product ?? "icdp/0.5.1";
     this.browserWsUrl = options.browserWsUrl ?? "";
     this.targetWsUrl = options.targetWsUrl;
   }

@@ -77,7 +77,7 @@ class FakeSocket extends EventTarget {
   close(code = 1000, reason = ""): void {
     if (this.readyState === WebSocket.CLOSED) return;
     this.readyState = WebSocket.CLOSED;
-    this.dispatchEvent(new CloseEvent("close", { code, reason }));
+    this.dispatchEvent(Object.assign(new Event("close"), { code, reason }));
   }
 }
 

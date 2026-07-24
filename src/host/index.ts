@@ -598,9 +598,9 @@ export class IcdpHost {
     if (message.method === "Browser.getVersion") {
       respond({
         protocolVersion: "1.3",
-        product: this.options.product ?? "icdp/0.5.0",
+        product: this.options.product ?? "icdp/0.5.1",
         revision: `icdp-v${PROTOCOL_VERSION}`,
-        userAgent: this.options.product ?? "icdp/0.5.0",
+        userAgent: this.options.product ?? "icdp/0.5.1",
         jsVersion: "synthetic",
       });
       return;

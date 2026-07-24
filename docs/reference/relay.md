@@ -27,7 +27,7 @@ const relay = await serveRelay({ hostPort: 3000, browserPort: 9229 });
 | `hostHostname` | `"127.0.0.1"` | Host-uplink bind address. |
 | `browserPort` | `0` | Client/discovery TCP port; `0` selects a free port. |
 | `browserHostname` | `"127.0.0.1"` | Client/discovery bind address. |
-| `product` | `"icdp/0.5.0"` | Product shown in HTTP discovery. |
+| `product` | `"icdp/0.5.1"` | Product shown in HTTP discovery. |
 | `hostPath` | `"/icdp/host"` | Host WebSocket path. |
 | `browserPath` | `"/devtools/browser"` | Client WebSocket path. |
 | `targetPathPrefix` | `"/devtools/page/"` | Direct Target WebSocket prefix. |

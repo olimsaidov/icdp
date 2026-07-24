@@ -254,6 +254,37 @@ test("recognizes branded values created in another JavaScript realm", () => {
   });
 });
 
+test("does not confuse forged Error prototypes with genuine cross-realm errors", () => {
+  const store = new RemoteObjectStore();
+  const forged = Object.assign(Object.create(Error.prototype) as object, {
+    stack: "fake",
+  });
+  const crossRealm = runInNewContext(`({
+    forged: Object.assign(Object.create(Error.prototype), { stack: "fake" }),
+    withoutStack: (() => {
+      const error = new TypeError("cross-realm");
+      delete error.stack;
+      return error;
+    })()
+  })`) as { forged: object; withoutStack: TypeError };
+
+  for (const value of [forged, crossRealm.forged]) {
+    const remote = store.wrap(value);
+    expect(remote).toMatchObject({
+      type: "object",
+      className: "Error",
+      description: "Error",
+    });
+    expect(remote).not.toHaveProperty("subtype");
+  }
+  expect(store.wrap(crossRealm.withoutStack)).toMatchObject({
+    type: "object",
+    subtype: "error",
+    className: "TypeError",
+    description: expect.stringContaining("TypeError: cross-realm"),
+  });
+});
+
 // Ported from Chromium's runtime-evaluate-return-by-value.js and the broader
 // v8/test/inspector/runtime/remote-object.js return-by-value matrix.
 test("returns JSON values by value and reports Chromium's serialization failures", () => {
