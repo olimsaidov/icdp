@@ -40,6 +40,7 @@ type ServeRelay = (options: {
 export type NetworkNavigationHarness = {
   appOrigin: string;
   browser: CdpClient;
+  nativeBrowser: CdpClient;
   chromiumProduct: string;
   icdp: CdpClient;
   evaluate(expression: string): Promise<any>;
@@ -417,6 +418,7 @@ export async function createNetworkNavigationHarness(
   return {
     appOrigin,
     browser,
+    nativeBrowser: chromium.client,
     chromiumProduct: chromium.product,
     icdp,
     async evaluate(expression) {

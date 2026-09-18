@@ -62,7 +62,7 @@
     "ws": "^8.21.0"
   },
   "devDependencies": {
-    "@olimsaidov/agent-browser-wasm": "^0.38.1",
+    "@olimsaidov/agent-browser-wasm": "^0.38.2",
     "@types/aria-query": "^5.0.4",
     "@types/node": "^24",
     "@types/ws": "^8",
