@@ -35,6 +35,11 @@ const relay = await serveRelay({ hostPort: 3000, browserPort: 9229 });
 | `browserWsUrl` | derived | Public Client URL advertised by discovery. |
 | `fallback` | none | Handler for ordinary HTTP requests on the Host server. |
 
+Configured WebSocket paths are canonicalized once and the canonical paths are
+used for both advertised URLs and upgrade matching. Extra leading slashes are
+collapsed, and direct Target URLs always retain the configured browser
+endpoint's origin.
+
 ### `RelayServer`
 
 The result contains `core`, `hostServer`, `browserServer`, the two bound ports,

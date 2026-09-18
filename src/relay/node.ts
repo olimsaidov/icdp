@@ -80,13 +80,19 @@ function closeServer(server: Server): Promise<void> {
   });
 }
 
+function canonicalPath(path: string): string {
+  const url = new URL("http://icdp.invalid/");
+  url.pathname = `/${path.replace(/^[\\/]+/, "")}`;
+  return url.pathname;
+}
+
 /** Serve a Relay on Node. One Host uplink server, one Client CDP server. */
 export async function serveRelay(options: ServeRelayOptions = {}): Promise<RelayServer> {
   const browserHostname = options.browserHostname ?? "127.0.0.1";
   const hostHostname = options.hostHostname ?? "127.0.0.1";
-  const browserPath = options.browserPath ?? "/devtools/browser";
-  const targetPathPrefix = options.targetPathPrefix ?? "/devtools/page/";
-  const hostPath = options.hostPath ?? "/icdp/host";
+  const browserPath = canonicalPath(options.browserPath ?? "/devtools/browser");
+  const targetPathPrefix = canonicalPath(options.targetPathPrefix ?? "/devtools/page/");
+  const hostPath = canonicalPath(options.hostPath ?? "/icdp/host");
   let core: RelayCore | null = null;
 
   const browserServer = createServer((request, response) => {

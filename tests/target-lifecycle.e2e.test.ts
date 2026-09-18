@@ -245,10 +245,14 @@ async function startChrome(): Promise<Chrome> {
   });
   const activePortPath = join(profile, "DevToolsActivePort");
   try {
+    let port = "";
+    let browserPath = "";
     await until(async () => {
       try {
-        await access(activePortPath);
-        return true;
+        [port = "", browserPath = ""] = (await readFile(activePortPath, "utf8"))
+          .trim()
+          .split(/\r?\n/);
+        return Boolean(port && browserPath);
       } catch {
         if (child.exitCode !== null) {
           throw new Error(`Chrome exited with ${child.exitCode}\n${stderr}`);
@@ -256,8 +260,6 @@ async function startChrome(): Promise<Chrome> {
         return false;
       }
     }, "Chrome DevToolsActivePort");
-    const [port, browserPath] = (await readFile(activePortPath, "utf8")).trim().split("\n");
-    if (!port || !browserPath) throw new Error("invalid Chrome DevToolsActivePort");
     const client = await CdpClient.open(`ws://127.0.0.1:${port}${browserPath}`, false);
     return {
       client,

@@ -8,6 +8,7 @@ import {
   type RelayToHostMessage,
   type TargetSummary,
 } from "../protocol.ts";
+import { isUsableTargetId } from "../target-id.ts";
 
 /** Minimal socket surface the adapter must provide for each connection. */
 export type SocketLike = {
@@ -110,7 +111,7 @@ export class RelayCore {
           (target) =>
             typeof target === "object" &&
             target !== null &&
-            typeof target.targetId === "string" &&
+            isUsableTargetId(target.targetId) &&
             typeof target.title === "string" &&
             typeof target.url === "string",
         )
@@ -157,7 +158,7 @@ export class RelayCore {
       case "targetCreated":
       case "targetInfoChanged":
         if (
-          typeof message.target?.targetId !== "string" ||
+          !isUsableTargetId(message.target?.targetId) ||
           typeof message.target.title !== "string" ||
           typeof message.target.url !== "string"
         ) {

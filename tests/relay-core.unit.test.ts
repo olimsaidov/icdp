@@ -314,6 +314,28 @@ describe("Client transport", () => {
     expect(core.status().hostConnected).toBe(false);
   });
 
+  test.each(["", ".", "..", "\uD800"])(
+    "a Host cannot advertise unusable Target id %j",
+    (targetId) => {
+      const core = new RelayCore();
+      const host = fakeSocket();
+      core.hostConnected(host);
+
+      core.hostMessage(
+        host,
+        JSON.stringify({
+          kind: "ready",
+          v: 5,
+          instanceId: "host-1",
+          targets: [{ targetId, title: "Invalid", url: "http://app.test/" }],
+        } satisfies HostToRelayMessage),
+      );
+
+      expect(host.closed).toEqual({ code: 1002, reason: "Incompatible host protocol" });
+      expect(core.status()).toMatchObject({ hostConnected: false, targets: [] });
+    },
+  );
+
   test("different Relay instances never reuse Client identities", () => {
     const clientIdFrom = (core: RelayCore): string => {
       const host = fakeSocket();

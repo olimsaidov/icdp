@@ -67,7 +67,10 @@ subtree invalidates its frontend ids.
 `DOM.getBoxModel` uses page layout geometry and computed margins, borders, and
 padding. Text-node geometry comes from a DOM `Range`; unlike Blink's internal
 `LayoutText` visual-overflow quad, it cannot preserve rotated glyph quads or
-text-shadow overflow. It does not expose Chromium's layout tree or compositor
+text-shadow overflow. Elements and text under `transform`, `translate`,
+`rotate`, `scale`, or a CSS motion path return a protocol error: the page
+exposes only their axis-aligned bounding rectangle, not Chromium's layout box
+quadrilateral. It does not expose Chromium's layout tree or compositor
 internals.
 
 ### Input
@@ -101,6 +104,22 @@ Network.getResponseBody
 shapes and are delivered only to Sessions with Network enabled. Fetch/XHR
 response bodies are retained for `getResponseBody` in a bounded cache
 (100 bodies and 10 MiB by default).
+
+Fetch bodies come from a cloned response stream. A native fetch is normalized
+once through the native `Request` constructor, which preserves conversion
+counts while exposing effective methods and headers. If the page installed a
+fetch wrapper before Network was enabled, that wrapper receives the original
+arguments; calls with an `init` object are then omitted from observation rather
+than inspected a second time. XHR calls with application-defined conversion
+objects follow the same rule.
+
+XHR bodies are retained only when page JavaScript exposes them without
+reconstruction: decoded textual `""`/`"text"` responses with a textual MIME or
+charset, and byte-exact `"arraybuffer"`/`"blob"` responses. Their CDP text or
+base64 representation follows the response MIME, as in Chromium. For
+`"json"`/`"document"` responses and binary payloads exposed as text,
+`Network.getResponseBody` returns a protocol error because the original bytes
+are unavailable.
 
 Observation is implemented by wrapping page APIs. It cannot see the initial
 document, parser-created subresources, preloads, service workers, workers,
@@ -172,7 +191,11 @@ Page JavaScript also has no standard way to identify an arbitrary `Proxy`
 without invoking observable traps. Runtime therefore cannot reproduce V8's
 inspector-only `subtype: "proxy"` metadata for proxies created by the page.
 Ordinary objects, arrays, DOM wrappers, errors, promises, typed collections,
-and Trusted Types retain their Chromium RemoteObject shapes.
+and Trusted Types retain their Chromium RemoteObject shapes. Map and Set
+contents are exposed through Chromium-shaped `[[Entries]]` handles, including
+object-group lifetime. Standard collection iterators, generators, and
+WebAssembly memories carry their native subtypes where page APIs can identify
+them without consuming or invoking the value.
 
 `Runtime.runIfWaitingForDebugger` returns success because an icdp document is
 never held on Chromium's debugger-on-start gate; it does not emulate a
@@ -234,8 +257,11 @@ Specifically unsupported:
   ServiceWorker, Target worker/OOPIF, and browser-process domains;
 - DOM access inside child-frame documents, closed or user-agent shadow roots,
   and browser-internal trees;
-- V8's inspector-only proxy identity and exact transformed text visual-overflow
-  quads;
+- V8's inspector-only proxy identity, Promise state/result, exact ArrayBuffer
+  view lists, named-generator metadata, and unforgeable non-consuming iterator
+  brands;
+- transformed element and text quads, visual-overflow geometry, and compositor
+  state;
 - legacy non-flat `Target.sendMessageToTarget` sessions.
 
 Generic CDP clients may work when they stay inside the documented surface.

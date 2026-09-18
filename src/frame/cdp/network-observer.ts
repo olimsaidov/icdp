@@ -10,7 +10,12 @@ const INTERNAL_QUERY_PARAMETER = "__icdp_internal__";
 type Emit = (method: string, params: Record<string, unknown>) => void;
 
 type NetworkWindow = Window & {
+  AbortSignal: typeof AbortSignal;
   Blob: typeof Blob;
+  Headers: typeof Headers;
+  Request: typeof Request;
+  URL: typeof URL;
+  URLSearchParams: typeof URLSearchParams;
   WebSocket: typeof WebSocket;
   XMLHttpRequest: typeof XMLHttpRequest;
 };
@@ -55,12 +60,29 @@ interface SocketObservation {
 }
 
 type XhrOpenArguments = [
-  method: string,
-  url: string | URL,
+  method: unknown,
+  url: unknown,
   async?: boolean,
   username?: string | null,
   password?: string | null,
 ];
+
+const NORMALIZED_HTTP_METHODS = new Set(["DELETE", "GET", "HEAD", "OPTIONS", "POST", "PUT"]);
+const functionToString = Function.prototype.toString;
+
+function normalizeHttpMethod(method: string): string {
+  const upper = method.toUpperCase();
+  return NORMALIZED_HTTP_METHODS.has(upper) ? upper : method;
+}
+
+function isNativeFunction(value: unknown): value is CallableFunction {
+  if (typeof value !== "function") return false;
+  try {
+    return /\{\s*\[native code\]\s*\}/.test(Reflect.apply(functionToString, value, []));
+  } catch {
+    return false;
+  }
+}
 
 function headersToObject(headers: unknown): Protocol.Network.Headers {
   const result: Protocol.Network.Headers = {};
@@ -92,6 +114,27 @@ function headersToObject(headers: unknown): Protocol.Network.Headers {
   return result;
 }
 
+function observableHeaders(window: Window, headers: unknown): Protocol.Network.Headers | null {
+  if (headers === undefined || headers === null) return {};
+  const HeadersConstructor = (window as NetworkWindow).Headers;
+  const nativeForEach =
+    typeof HeadersConstructor === "function"
+      ? Object.getOwnPropertyDescriptor(HeadersConstructor.prototype, "forEach")?.value
+      : undefined;
+  if (typeof nativeForEach === "function") {
+    const result: Protocol.Network.Headers = {};
+    try {
+      Reflect.apply(nativeForEach, headers, [
+        (value: unknown, name: unknown) => {
+          result[String(name).toLowerCase()] = String(value);
+        },
+      ]);
+      return result;
+    } catch {}
+  }
+  return null;
+}
+
 function rawHeadersToObject(rawHeaders: string): Protocol.Network.Headers {
   const result: Protocol.Network.Headers = {};
   for (const line of rawHeaders.split(/\r?\n/)) {
@@ -116,7 +159,8 @@ function contentType(headers: Protocol.Network.Headers): {
     parameters
       .find((parameter) => parameter.toLowerCase().startsWith("charset="))
       ?.slice("charset=".length)
-      .trim() ?? "";
+      .trim()
+      .replace(/^(["'])(.*)\1$/, "$2") ?? "";
   return { charset, mimeType };
 }
 
@@ -181,12 +225,14 @@ export class NetworkObserver {
     if (typeof this.window.fetch !== "function") return;
     const observeFetch = this.observeFetch.bind(this);
     const original = this.window.fetch;
+    const RequestConstructor = (this.window as NetworkWindow).Request;
+    const normalize = isNativeFunction(original) && isNativeFunction(RequestConstructor);
     this.originalFetch = original;
     const wrapper = function (
       this: Window,
       ...args: Parameters<typeof fetch>
     ): ReturnType<typeof fetch> {
-      return observeFetch(this, original, args);
+      return observeFetch(this, original, args, normalize);
     };
     this.fetchWrapper = wrapper;
     this.window.fetch = wrapper;
@@ -320,7 +366,25 @@ export class NetworkObserver {
   }
 
   private openXhr(xhr: XMLHttpRequest, args: XhrOpenArguments): void {
-    const url = new URL(String(args[1]), this.window.location.href);
+    if (typeof args[0] !== "string") {
+      this.xhrRequests.delete(xhr);
+      return;
+    }
+    let rawUrl: string;
+    if (typeof args[1] === "string") {
+      rawUrl = args[1];
+    } else {
+      try {
+        const URLConstructor = (this.window as NetworkWindow).URL;
+        const getter = Object.getOwnPropertyDescriptor(URLConstructor.prototype, "href")?.get;
+        if (!getter) throw new TypeError("URL getter is unavailable");
+        rawUrl = Reflect.apply(getter, args[1], []) as string;
+      } catch {
+        this.xhrRequests.delete(xhr);
+        return;
+      }
+    }
+    const url = new URL(rawUrl, this.window.location.href);
     const suppressed = url.searchParams.get(INTERNAL_QUERY_PARAMETER) === "true";
     url.hash = "";
     this.xhrRequests.set(xhr, {
@@ -328,15 +392,19 @@ export class NetworkObserver {
       loaderId: this.loaderId(),
       type: "XHR",
       url: url.href,
-      method: String(args[0]).toUpperCase(),
+      method: normalizeHttpMethod(args[0]),
       headers: {},
       suppressed,
     });
   }
 
-  private setXhrRequestHeader(xhr: XMLHttpRequest, name: string, value: string): void {
+  private setXhrRequestHeader(xhr: XMLHttpRequest, name: unknown, value: unknown): void {
     const state = this.xhrRequests.get(xhr);
     if (!state) return;
+    if (typeof name !== "string" || typeof value !== "string") {
+      state.suppressed = true;
+      return;
+    }
     const normalizedName = name.toLowerCase();
     const previous = state.headers[normalizedName];
     state.headers[normalizedName] = previous === undefined ? value : `${previous}, ${value}`;
@@ -352,17 +420,32 @@ export class NetworkObserver {
       Reflect.apply(originalSend, xhr, args);
       return;
     }
-    const body = typeof args[0] === "string" ? args[0] : undefined;
+    const bodyValue = args[0];
+    let body = typeof bodyValue === "string" ? bodyValue : undefined;
+    const headers = { ...state.headers };
+    if (bodyValue !== null && bodyValue !== undefined && body === undefined) {
+      try {
+        const URLSearchParamsConstructor = (this.window as NetworkWindow).URLSearchParams;
+        body = Reflect.apply(
+          URLSearchParamsConstructor.prototype.toString,
+          bodyValue,
+          [],
+        ) as string;
+        headers["content-type"] ??= "application/x-www-form-urlencoded;charset=UTF-8";
+      } catch {}
+    } else if (body !== undefined) {
+      headers["content-type"] ??= "text/plain;charset=UTF-8";
+    }
     const request: Protocol.Network.Request = {
       url: state.url,
       method: state.method,
-      headers: state.headers,
+      headers,
       initialPriority: "High",
       referrerPolicy: "strict-origin-when-cross-origin",
     };
-    if (body !== undefined) {
-      request.postData = body;
+    if (bodyValue !== null && bodyValue !== undefined) {
       request.hasPostData = true;
+      if (body !== undefined) request.postData = body;
     }
     this.publish("Network.requestWillBeSent", {
       requestId: state.requestId,
@@ -434,7 +517,12 @@ export class NetworkObserver {
       hasExtraInfo: false,
     } satisfies Protocol.Network.ResponseReceivedEvent);
 
-    const captured = await this.captureXhrBody(xhr, mimeType, charset);
+    const captured = await this.captureXhrBody(
+      xhr,
+      responseContentLength(headers),
+      mimeType,
+      charset,
+    );
     if (!this.installed) return;
     this.finishResponse(
       state.requestId,
@@ -446,12 +534,13 @@ export class NetworkObserver {
 
   private async captureXhrBody(
     xhr: XMLHttpRequest,
+    declaredLength: number | undefined,
     mimeType: string,
     charset: string,
   ): Promise<BodyCapture> {
     if (xhr.responseType === "arraybuffer") {
       const bytes = new Uint8Array((xhr.response as ArrayBuffer | null) ?? new ArrayBuffer(0));
-      return this.captureKnownBinary(bytes);
+      return this.captureKnownBinary(bytes, mimeType, charset);
     }
     if (xhr.responseType === "blob") {
       const blob = xhr.response as Blob | null;
@@ -465,29 +554,23 @@ export class NetworkObserver {
         return { bytes, complete: true };
       }
       try {
-        return this.captureKnownBinary(new Uint8Array(await blob.arrayBuffer()));
+        return this.captureKnownBinary(new Uint8Array(await blob.arrayBuffer()), mimeType, charset);
       } catch {
         return { bytes, complete: true };
       }
     }
 
-    const body =
-      xhr.responseType === "json"
-        ? (JSON.stringify(xhr.response) ?? "")
-        : xhr.responseType === "document"
-          ? this.serializeDocument(xhr.response)
-          : xhr.responseText;
+    if (xhr.responseType === "json" || xhr.responseType === "document") {
+      return { bytes: declaredLength ?? 0, complete: true };
+    }
+
+    const body = xhr.responseText;
     const bytes = new TextEncoder().encode(body);
+    if (!this.isTextualMimeType(mimeType, charset)) {
+      return { bytes: declaredLength ?? bytes.byteLength, complete: true };
+    }
     if (bytes.byteLength > this.maxBodyBytes || this.maxBodyCount === 0) {
       return { bytes: bytes.byteLength, complete: true };
-    }
-    if (xhr.responseType === "" && !this.isTextualMimeType(mimeType, charset)) {
-      return {
-        body: this.base64Encode(bytes),
-        bytes: bytes.byteLength,
-        base64Encoded: true,
-        complete: true,
-      };
     }
     return {
       body,
@@ -497,25 +580,11 @@ export class NetworkObserver {
     };
   }
 
-  private captureKnownBinary(bytes: Uint8Array): BodyCapture {
+  private captureKnownBinary(bytes: Uint8Array, mimeType: string, charset: string): BodyCapture {
     if (bytes.byteLength > this.maxBodyBytes || this.maxBodyCount === 0) {
       return { bytes: bytes.byteLength, complete: true };
     }
-    return {
-      body: this.base64Encode(bytes),
-      bytes: bytes.byteLength,
-      base64Encoded: true,
-      complete: true,
-    };
-  }
-
-  private serializeDocument(value: unknown): string {
-    if (!value || typeof XMLSerializer === "undefined") return "";
-    try {
-      return new XMLSerializer().serializeToString(value as Node);
-    } catch {
-      return "";
-    }
+    return this.encodeCapturedBody(bytes, mimeType, charset);
   }
 
   private observeWebSocket(socket: WebSocket, rawUrl: string, protocols?: string | string[]): void {
@@ -700,34 +769,90 @@ export class NetworkObserver {
     receiver: Window,
     original: typeof fetch,
     args: Parameters<typeof fetch>,
+    normalize: boolean,
   ): ReturnType<typeof fetch> {
     const [input, init] = args;
-    const inputRecord =
-      typeof input === "object" && input !== null
-        ? (input as unknown as {
-            headers?: HeadersInit;
-            method?: string;
-            referrerPolicy?: ReferrerPolicy;
-            signal?: AbortSignal;
-            url?: string;
-          })
-        : undefined;
-    const rawUrl = inputRecord?.url ?? String(input);
-    const url = new URL(rawUrl, this.window.location.href);
-    if (url.searchParams.get(INTERNAL_QUERY_PARAMETER) === "true") {
+    let observedInput = input;
+    let forwardedArgs = args;
+    let rawUrl: string | undefined;
+    let method = "GET";
+    let requestHeaders: Protocol.Network.Headers = {};
+    let referrerPolicy = "strict-origin-when-cross-origin";
+    let effectiveSignal: AbortSignal | null | undefined;
+    let hasPostData = false;
+    let postDataPromise: Promise<string> | undefined;
+    const RequestConstructor = (this.window as NetworkWindow).Request;
+    if (normalize) {
+      try {
+        observedInput = new RequestConstructor(input, init);
+        forwardedArgs = [observedInput];
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    } else if (init !== undefined) {
       return Reflect.apply(original, receiver, args);
     }
-    const effectiveSignal = init?.signal !== undefined ? init.signal : inputRecord?.signal;
-    if (effectiveSignal?.aborted) {
-      return Reflect.apply(original, receiver, args);
+    if (typeof observedInput === "string") {
+      rawUrl = observedInput;
+    } else if (typeof RequestConstructor === "function") {
+      try {
+        const prototype = RequestConstructor.prototype;
+        const read = (name: string): unknown => {
+          const getter = Object.getOwnPropertyDescriptor(prototype, name)?.get;
+          if (!getter) throw new TypeError("Request getter is unavailable");
+          return Reflect.apply(getter, observedInput, []);
+        };
+        rawUrl = read("url") as string;
+        method = read("method") as string;
+        const headers = observableHeaders(this.window, read("headers"));
+        if (headers === null) return Reflect.apply(original, receiver, forwardedArgs);
+        requestHeaders = headers;
+        referrerPolicy = (read("referrerPolicy") as string) || referrerPolicy;
+        effectiveSignal = read("signal") as AbortSignal;
+        hasPostData = read("body") !== null;
+        const clone = Object.getOwnPropertyDescriptor(prototype, "clone")?.value;
+        const text = Object.getOwnPropertyDescriptor(prototype, "text")?.value;
+        if (hasPostData && isNativeFunction(clone) && isNativeFunction(text)) {
+          postDataPromise = Reflect.apply(text, Reflect.apply(clone, observedInput, []), []);
+        }
+      } catch {
+        const URLConstructor = (this.window as NetworkWindow).URL;
+        try {
+          const getter = Object.getOwnPropertyDescriptor(URLConstructor.prototype, "href")?.get;
+          if (!getter) throw new TypeError("URL getter is unavailable");
+          rawUrl = Reflect.apply(getter, observedInput, []) as string;
+        } catch {
+          return Reflect.apply(original, receiver, forwardedArgs);
+        }
+      }
+    }
+
+    if (rawUrl === undefined) return Reflect.apply(original, receiver, forwardedArgs);
+    let url: URL;
+    try {
+      url = new URL(rawUrl, this.window.location.href);
+    } catch {
+      return Reflect.apply(original, receiver, forwardedArgs);
+    }
+    if (url.searchParams.get(INTERNAL_QUERY_PARAMETER) === "true") {
+      return Reflect.apply(original, receiver, forwardedArgs);
+    }
+    if (effectiveSignal) {
+      try {
+        const AbortSignalConstructor = (this.window as NetworkWindow).AbortSignal;
+        const aborted = Object.getOwnPropertyDescriptor(
+          AbortSignalConstructor.prototype,
+          "aborted",
+        )?.get;
+        if (!aborted || Reflect.apply(aborted, effectiveSignal, [])) {
+          return Reflect.apply(original, receiver, forwardedArgs);
+        }
+      } catch {
+        return Reflect.apply(original, receiver, forwardedArgs);
+      }
     }
     const fragment = url.hash;
     url.hash = "";
-    const requestHeaders = {
-      ...headersToObject(inputRecord?.headers),
-      ...headersToObject(init?.headers),
-    };
-    const body = typeof init?.body === "string" ? init.body : undefined;
     const loaderId = this.loaderId();
     const requestId = this.createRequestId();
     const state: RequestState = {
@@ -738,34 +863,55 @@ export class NetworkObserver {
     };
     const request: Protocol.Network.Request = {
       url: url.href,
-      method: String(init?.method ?? inputRecord?.method ?? "GET").toUpperCase(),
+      method: normalizeHttpMethod(method),
       headers: requestHeaders,
       initialPriority: "High",
-      referrerPolicy: (init?.referrerPolicy ||
-        inputRecord?.referrerPolicy ||
-        "strict-origin-when-cross-origin") as Protocol.Network.Request["referrerPolicy"],
+      referrerPolicy: referrerPolicy as Protocol.Network.Request["referrerPolicy"],
     };
     if (fragment) request.urlFragment = fragment;
-    if (body !== undefined) {
-      request.postData = body;
+    if (hasPostData) {
       request.hasPostData = true;
     }
-    this.publish("Network.requestWillBeSent", {
-      requestId,
-      loaderId,
-      documentURL: this.window.document.URL,
-      request,
-      timestamp: this.monotonicTime(),
-      wallTime: Date.now() / 1000,
-      initiator: { type: "script" },
-      redirectHasExtraInfo: false,
-      type: "Fetch",
-    } satisfies Protocol.Network.RequestWillBeSentEvent);
+    const promise = Reflect.apply(original, receiver, forwardedArgs);
+    let requestEventPublished = false;
+    const publishRequest = (): void => {
+      this.publish("Network.requestWillBeSent", {
+        requestId,
+        loaderId,
+        documentURL: this.window.document.URL,
+        request,
+        timestamp: this.monotonicTime(),
+        wallTime: Date.now() / 1000,
+        initiator: { type: "script" },
+        redirectHasExtraInfo: false,
+        type: "Fetch",
+      } satisfies Protocol.Network.RequestWillBeSentEvent);
+      requestEventPublished = true;
+    };
+    let requestPublished = Promise.resolve();
+    if (postDataPromise) {
+      requestPublished = postDataPromise
+        .then(
+          (postData) => {
+            request.postData = postData;
+          },
+          () => {},
+        )
+        .then(publishRequest);
+    } else {
+      publishRequest();
+    }
 
-    const promise = Reflect.apply(original, receiver, args);
     void promise.then(
-      (response) => this.observeFetchResponse(state, response),
-      (error: unknown) => this.loadingFailed(state, error),
+      (response) => {
+        if (requestEventPublished) return this.observeFetchResponse(state, response);
+        let observedResponse = response;
+        try {
+          observedResponse = response.clone();
+        } catch {}
+        return requestPublished.then(() => this.observeFetchResponse(state, observedResponse));
+      },
+      (error: unknown) => requestPublished.then(() => this.loadingFailed(state, error)),
     );
     return promise;
   }

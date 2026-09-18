@@ -53,9 +53,10 @@ host.pair(iframe, {
 });
 ```
 
-`targetId` must be unique. `origins` is a string array or `"*"`. The Host
-probes the iframe, accepts `hello` only from that iframe window at an allowed
-origin, and transfers a `MessagePort` with `welcome`.
+`targetId` must be unique, non-empty, URI-encodable, and not `.` or `..`.
+`origins` is a string array or `"*"`. The Host probes the iframe, accepts
+`hello` only from that iframe window at an allowed origin, and transfers a
+`MessagePort` with `welcome`.
 
 The Pairing is visible as a Target before its Frame Agent connects. Commands
 against a disconnected Pairing fail with `-32000`.

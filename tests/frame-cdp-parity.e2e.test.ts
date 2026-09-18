@@ -52,6 +52,8 @@ type ParityHarness = {
   native: CdpEndpoint;
 };
 
+const XHR_JSON_BODY = '{\n  "value" : 1,\n  "nested": [ true, null ]\n}\n';
+
 const CHROME_PATHS = [
   process.env.CHROME_PATH,
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -378,6 +380,24 @@ async function createParityHarness(): Promise<ParityHarness> {
     if (path === "/data") {
       response.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
       return response.end("parity-response");
+    }
+    if (path === "/xhr-binary") {
+      response.writeHead(200, {
+        "Content-Length": "3",
+        "Content-Type": "application/octet-stream",
+      });
+      return response.end(Buffer.from([0, 255, 1]));
+    }
+    if (path === "/xhr-json") {
+      response.writeHead(200, {
+        "Content-Length": String(Buffer.byteLength(XHR_JSON_BODY)),
+        "Content-Type": "application/json",
+      });
+      return response.end(XHR_JSON_BODY);
+    }
+    if (path === "/xhr-quoted") {
+      response.writeHead(200, { "Content-Type": 'text/plain; charset="utf-8"' });
+      return response.end("quoted-charset");
     }
     sendHtml(response, appHtml(parentOrigin));
   });
@@ -979,6 +999,250 @@ test("Runtime describes DOM wrappers with Blink-compatible subtypes", async () =
         description: "<b>safe</b>",
       });
 
+      for (const [expression, expected] of [
+        [
+          "new Map([[1, 2]]).entries()",
+          {
+            type: "object",
+            subtype: "iterator",
+            className: "MapIterator",
+            description: "MapIterator",
+          },
+        ],
+        [
+          "new Set([1]).values()",
+          {
+            type: "object",
+            subtype: "iterator",
+            className: "SetIterator",
+            description: "SetIterator",
+          },
+        ],
+        [
+          "(function* () {})()",
+          {
+            type: "object",
+            subtype: "generator",
+            className: "Generator",
+            description: "Generator",
+          },
+        ],
+        [
+          "(async function* () {})()",
+          {
+            type: "object",
+            subtype: "generator",
+            className: "AsyncGenerator",
+            description: "AsyncGenerator",
+          },
+        ],
+        [
+          "new WebAssembly.Memory({ initial: 1 })",
+          {
+            type: "object",
+            subtype: "webassemblymemory",
+            className: "Memory",
+            description: "Memory(1)",
+          },
+        ],
+      ] as const) {
+        expect((await endpoint.send("Runtime.evaluate", { expression })).result).toMatchObject(
+          expected,
+        );
+      }
+      const stringIterator = await endpoint.send("Runtime.evaluate", {
+        expression: "'x'[Symbol.iterator]()",
+      });
+      expect(stringIterator.result).toMatchObject({
+        type: "object",
+        className: "StringIterator",
+        description: "StringIterator",
+      });
+      expect(stringIterator.result).not.toHaveProperty("subtype");
+
+      const map = await endpoint.send("Runtime.evaluate", {
+        expression: "new Map([['a', 1]])",
+        objectGroup: "entries-parity",
+      });
+      const mapProperties = await endpoint.send("Runtime.getProperties", {
+        objectId: map.result.objectId,
+        ownProperties: true,
+      });
+      const entries = mapProperties.internalProperties.find(
+        (property: Record<string, any>) => property.name === "[[Entries]]",
+      ).value;
+      expect(entries).toMatchObject({
+        type: "object",
+        subtype: "array",
+        className: "Array",
+        description: "Array(1)",
+        objectId: expect.any(String),
+      });
+      const directEntry = await endpoint.send("Runtime.callFunctionOn", {
+        objectId: entries.objectId,
+        functionDeclaration: "function () { return this[0]; }",
+      });
+      expect(directEntry.result).toMatchObject({
+        subtype: "internal#entry",
+        className: "Object",
+        description: '{"a" => 1}',
+      });
+      const entriesProperties = await endpoint.send("Runtime.getProperties", {
+        objectId: entries.objectId,
+        ownProperties: true,
+      });
+      expect(entriesProperties).not.toHaveProperty("internalProperties");
+      expect(entriesProperties.result[0].value).toMatchObject({
+        subtype: "internal#entry",
+        description: '{"a" => 1}',
+        objectId: expect.any(String),
+      });
+      const entryObjectId = entriesProperties.result[0].value.objectId;
+      const entryProperties = await endpoint.send("Runtime.getProperties", {
+        objectId: entryObjectId,
+        ownProperties: true,
+      });
+      expect(entryProperties).not.toHaveProperty("internalProperties");
+      expect(
+        Object.fromEntries(
+          entryProperties.result.map((property: Record<string, any>) => [
+            property.name,
+            property.value.value,
+          ]),
+        ),
+      ).toEqual({ key: "a", value: 1 });
+
+      const sameEntries = await endpoint.send("Runtime.callFunctionOn", {
+        objectId: entries.objectId,
+        functionDeclaration: "function () { return this; }",
+      });
+      expect(sameEntries.result).toMatchObject({
+        subtype: "array",
+        className: "Array",
+        description: "Array(1)",
+      });
+      expect(
+        await endpoint.send("Runtime.getProperties", {
+          objectId: sameEntries.result.objectId,
+          ownProperties: true,
+        }),
+      ).not.toHaveProperty("internalProperties");
+
+      expect(
+        await endpoint.send("Runtime.getProperties", {
+          objectId: directEntry.result.objectId,
+          ownProperties: true,
+        }),
+      ).not.toHaveProperty("internalProperties");
+
+      const entryPrototypes = await endpoint.send("Runtime.callFunctionOn", {
+        objectId: entries.objectId,
+        functionDeclaration: `function () {
+          return {
+            array: Array.isArray(this),
+            entries: Object.getPrototypeOf(this),
+            entry: Object.getPrototypeOf(this[0])
+          };
+        }`,
+        returnByValue: true,
+      });
+      expect(entryPrototypes.result.value).toEqual({
+        array: true,
+        entries: null,
+        entry: null,
+      });
+
+      const mutableMap = await endpoint.send("Runtime.evaluate", {
+        expression: "new Map([['mutable', 1]])",
+        objectGroup: "entries-parity",
+      });
+      const mutableMapProperties = await endpoint.send("Runtime.getProperties", {
+        objectId: mutableMap.result.objectId,
+        ownProperties: true,
+      });
+      const mutableEntries = mutableMapProperties.internalProperties.find(
+        (property: Record<string, any>) => property.name === "[[Entries]]",
+      ).value;
+      await endpoint.send("Runtime.callFunctionOn", {
+        objectId: mutableEntries.objectId,
+        functionDeclaration: `function () {
+          this[0] = { replacement: true };
+          this.extra = 7;
+        }`,
+      });
+      const replacedEntries = await endpoint.send("Runtime.getProperties", {
+        objectId: mutableEntries.objectId,
+        ownProperties: true,
+      });
+      expect(replacedEntries).not.toHaveProperty("internalProperties");
+      expect(
+        replacedEntries.result.find((property: Record<string, any>) => property.name === "0").value,
+      ).not.toHaveProperty("subtype", "internal#entry");
+      expect(
+        replacedEntries.result.find((property: Record<string, any>) => property.name === "extra")
+          .value.value,
+      ).toBe(7);
+
+      await endpoint.send("Runtime.callFunctionOn", {
+        objectId: mutableEntries.objectId,
+        functionDeclaration: `function () {
+          delete this[0];
+          delete this.extra;
+          this.length = 2;
+        }`,
+      });
+      const sparseEntries = await endpoint.send("Runtime.getProperties", {
+        objectId: mutableEntries.objectId,
+        ownProperties: true,
+      });
+      expect(sparseEntries.result.map((property: Record<string, any>) => property.name)).toEqual([
+        "length",
+      ]);
+      expect(sparseEntries.result[0].value.value).toBe(2);
+
+      const accessorMap = await endpoint.send("Runtime.evaluate", {
+        expression: `(() => {
+          window.__entryNameGetterCalls = 0;
+          const constructor = function EntryKey() {};
+          Object.defineProperty(constructor, "name", {
+            get() {
+              window.__entryNameGetterCalls++;
+              return "Observed";
+            }
+          });
+          return new Map([[Object.create({ constructor }), 1]]);
+        })()`,
+        objectGroup: "entries-parity",
+      });
+      const accessorMapProperties = await endpoint.send("Runtime.getProperties", {
+        objectId: accessorMap.result.objectId,
+        ownProperties: true,
+      });
+      const accessorEntries = accessorMapProperties.internalProperties.find(
+        (property: Record<string, any>) => property.name === "[[Entries]]",
+      ).value;
+      await endpoint.send("Runtime.getProperties", {
+        objectId: accessorEntries.objectId,
+        ownProperties: true,
+      });
+      expect(
+        (
+          await endpoint.send("Runtime.evaluate", {
+            expression: "window.__entryNameGetterCalls",
+            returnByValue: true,
+          })
+        ).result.value,
+      ).toBe(0);
+
+      await endpoint.send("Runtime.releaseObjectGroup", { objectGroup: "entries-parity" });
+      expect(
+        (
+          await endpoint.request("Runtime.getProperties", {
+            objectId: entries.objectId,
+          })
+        ).error,
+      ).toMatchObject({ code: -32000 });
+
       await endpoint.send("Runtime.evaluate", {
         expression: `(() => {
           document.querySelector("#runtime-cross-realm")?.remove();
@@ -1486,6 +1750,64 @@ test("DOM.getBoxModel distinguishes text from non-layout nodes", async () => {
 
     await exercise(harness.native);
     await exercise(harness.icdp);
+  } finally {
+    await harness.close();
+  }
+}, 120_000);
+
+test("DOM.getBoxModel exposes native rotated quads and rejects inaccessible transformed quads", async () => {
+  const harness = await createParityHarness();
+  try {
+    const prepare = async (endpoint: CdpEndpoint) => {
+      await endpoint.send("Runtime.evaluate", {
+        expression: `(() => {
+          document.querySelector("#individual-transform")?.remove();
+          const element = document.createElement("div");
+          element.id = "individual-transform";
+          element.style.rotate = "30deg";
+          element.textContent = "Rotated text";
+          const motion = document.createElement("div");
+          motion.id = "motion-transform";
+          motion.style.offsetPath = 'path("M 0 0 L 100 100")';
+          motion.style.offsetDistance = "50%";
+          motion.style.offsetRotate = "45deg";
+          motion.textContent = "Motion path";
+          document.body.append(element, motion);
+        })()`,
+      });
+      const { root } = await endpoint.send("DOM.getDocument", { depth: -1 });
+      const query = await endpoint.send("DOM.querySelectorAll", {
+        nodeId: root.nodeId,
+        selector: "#individual-transform",
+      });
+      const described = await endpoint.send("DOM.describeNode", {
+        nodeId: query.nodeIds[0],
+        depth: 1,
+      });
+      const motionQuery = await endpoint.send("DOM.querySelectorAll", {
+        nodeId: root.nodeId,
+        selector: "#motion-transform",
+      });
+      return {
+        element: query.nodeIds[0] as number,
+        motion: motionQuery.nodeIds[0] as number,
+        text: described.node.children[0].nodeId as number,
+      };
+    };
+
+    const nativeIds = await prepare(harness.native);
+    for (const nodeId of [nativeIds.element, nativeIds.text, nativeIds.motion]) {
+      const { model } = await harness.native.send("DOM.getBoxModel", { nodeId });
+      expect(model.border[1]).not.toBeCloseTo(model.border[3]);
+    }
+
+    const icdpIds = await prepare(harness.icdp);
+    for (const nodeId of [icdpIds.element, icdpIds.text, icdpIds.motion]) {
+      expect((await harness.icdp.request("DOM.getBoxModel", { nodeId })).error).toEqual({
+        code: -32000,
+        message: "Could not compute box model.",
+      });
+    }
   } finally {
     await harness.close();
   }
@@ -3114,6 +3436,59 @@ test("Input mouse clicks preserve coordinates, modifiers, focus, and clickCount"
   }
 }, 120_000);
 
+test("Input mouse state survives a flattened Session handoff", async () => {
+  const harness = await createParityHarness();
+  try {
+    const additional = await harness.attachAdditionalSessions();
+    for (const [primary, secondary] of [
+      [harness.native, additional.native],
+      [harness.icdp, additional.icdp],
+    ] as const) {
+      const geometry = await primary.send("Runtime.evaluate", {
+        expression: `(() => {
+          document.querySelector("#session-handoff")?.remove();
+          const button = document.createElement("button");
+          button.id = "session-handoff";
+          button.style.cssText =
+            "position:fixed;left:320px;top:20px;width:120px;height:50px";
+          button.textContent = "Session handoff";
+          window.__sessionHandoffClicks = 0;
+          button.addEventListener("click", () => window.__sessionHandoffClicks++);
+          document.body.append(button);
+          const rect = button.getBoundingClientRect();
+          return { x: (rect.left + rect.right) / 2, y: (rect.top + rect.bottom) / 2 };
+        })()`,
+        returnByValue: true,
+      });
+      const { x, y } = geometry.result.value;
+      await primary.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+      await primary.send("Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        x,
+        y,
+        button: "left",
+        buttons: 1,
+        clickCount: 1,
+      });
+      await secondary.send("Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        x,
+        y,
+        button: "left",
+        buttons: 0,
+        clickCount: 1,
+      });
+      const clicks = await primary.send("Runtime.evaluate", {
+        expression: "window.__sessionHandoffClicks",
+        returnByValue: true,
+      });
+      expect(clicks.result.value).toBe(1);
+    }
+  } finally {
+    await harness.close();
+  }
+}, 120_000);
+
 test("Input pointer fields and cross-target hover transitions match Chromium", async () => {
   const harness = await createParityHarness();
   try {
@@ -3555,6 +3930,285 @@ test("Network observes page fetches, returns bodies, and stops after disable", a
   }
 }, 120_000);
 
+test("Network instrumentation preserves fetch coercion and rejection semantics", async () => {
+  const harness = await createParityHarness();
+  try {
+    const exercise = async (endpoint: CdpEndpoint, source: string) => {
+      await endpoint.send("Network.enable");
+      const marker = `coercion=1&source=${source}`;
+      const requestEvent = endpoint.waitForEvent("Network.requestWillBeSent", (params) =>
+        params.request?.url?.includes(marker),
+      );
+      const responseEvent = endpoint.waitForEvent("Network.responseReceived", (params) =>
+        params.response?.url?.includes(marker),
+      );
+      const result = await endpoint.send("Runtime.evaluate", {
+        expression: `(async () => {
+          let coercions = 0;
+          const input = {
+            toString() {
+              coercions++;
+              return location.origin + "/data?coercion=" + coercions + "&source=${source}";
+            }
+          };
+          const text = await fetch(input).then(response => response.text());
+          let invalidSync = false;
+          let invalidPromise = false;
+          let invalidName = "";
+          try {
+            const request = fetch("http://[");
+            invalidPromise = request instanceof Promise;
+            try {
+              await request;
+            } catch (error) {
+              invalidName = error.name;
+            }
+          } catch (error) {
+            invalidSync = true;
+            invalidName = error.name;
+          }
+          return { coercions, text, invalidName, invalidPromise, invalidSync };
+        })()`,
+        awaitPromise: true,
+        returnByValue: true,
+      });
+      expect(result.result.value).toEqual({
+        coercions: 1,
+        text: "parity-response",
+        invalidName: "TypeError",
+        invalidPromise: true,
+        invalidSync: false,
+      });
+      const [request, response] = await Promise.all([requestEvent, responseEvent]);
+      expect(request.request.url).toBe(response.response.url);
+      expect(request.request.url).toContain(marker);
+
+      const proxyMarker = `proxy-init=1&source=${source}`;
+      const proxyRequest = endpoint.waitForEvent("Network.requestWillBeSent", (params) =>
+        params.request?.url?.includes(proxyMarker),
+      );
+      const proxyResult = await endpoint.send("Runtime.evaluate", {
+        expression: `(async () => {
+          const counts = { getPrototypeOf: 0, ownKeys: 0 };
+          const target = { method: "GET" };
+          const init = new Proxy(target, {
+            getPrototypeOf() {
+              counts.getPrototypeOf++;
+              target.method = "POST";
+              return Object.prototype;
+            },
+            ownKeys() {
+              counts.ownKeys++;
+              return Reflect.ownKeys(target);
+            }
+          });
+          await fetch(location.origin + "/data?${proxyMarker}", init);
+          return counts;
+        })()`,
+        awaitPromise: true,
+        returnByValue: true,
+      });
+      expect(proxyResult.result.value).toEqual({ getPrototypeOf: 0, ownKeys: 0 });
+      expect((await proxyRequest).request.method).toBe("GET");
+
+      const metadataMarker = `metadata=1&source=${source}`;
+      const metadataRequest = endpoint.waitForEvent("Network.requestWillBeSent", (params) =>
+        params.request?.url?.includes(metadataMarker),
+      );
+      await endpoint.send("Runtime.evaluate", {
+        expression: `fetch(location.origin + "/data?${metadataMarker}", {
+          method: "mIxEd-CaSe",
+          body: "hello",
+          headers: [
+            ["X-Probe", "  yes \\t"],
+            ["X-Duplicate", "a"],
+            ["x-duplicate", "b"]
+          ]
+        }).then(response => response.text())`,
+        awaitPromise: true,
+      });
+      const metadata = (await metadataRequest).request;
+      const metadataHeaders = Object.fromEntries(
+        Object.entries(metadata.headers).map(([name, value]) => [name.toLowerCase(), value]),
+      );
+      expect({ ...metadata, headers: metadataHeaders }).toMatchObject({
+        method: "mIxEd-CaSe",
+        headers: {
+          "content-type": "text/plain;charset=UTF-8",
+          "x-duplicate": "a, b",
+          "x-probe": "yes",
+        },
+        hasPostData: true,
+        postData: "hello",
+      });
+
+      await endpoint.send("Network.disable");
+      await endpoint.send("Runtime.evaluate", {
+        expression: `(() => {
+          const pageFetch = window.fetch;
+          window.__fetchArgumentProbe = undefined;
+          window.fetch = function (...args) {
+            window.__fetchArgumentProbe = {
+              argCount: args.length,
+              inputClass: args[0]?.constructor?.name,
+              sameInit: args[1] === window.__fetchExpected.init,
+              sameInput: args[0] === window.__fetchExpected.input
+            };
+            return Reflect.apply(pageFetch, this, args);
+          };
+        })()`,
+      });
+      await endpoint.send("Network.enable");
+      const wrapperResult = await endpoint.send("Runtime.evaluate", {
+        expression: `(async () => {
+          const input = location.origin + "/data?wrapper=1&source=${source}";
+          const init = { headers: { "x-wrapper": "yes" } };
+          window.__fetchExpected = { input, init };
+          const text = await fetch(input, init).then(response => response.text());
+          return { ...window.__fetchArgumentProbe, text };
+        })()`,
+        awaitPromise: true,
+        returnByValue: true,
+      });
+      expect(wrapperResult.result.value).toEqual({
+        argCount: 2,
+        inputClass: "String",
+        sameInit: true,
+        sameInput: true,
+        text: "parity-response",
+      });
+    };
+
+    await exercise(harness.native, "native");
+    await exercise(harness.icdp, "icdp");
+  } finally {
+    await harness.close();
+  }
+}, 120_000);
+
+test("Network returns byte-exact XHR bodies or an explicit unavailable-body error", async () => {
+  const harness = await createParityHarness();
+  try {
+    const runXhr = async (
+      endpoint: CdpEndpoint,
+      path: "/data" | "/xhr-binary" | "/xhr-json" | "/xhr-quoted",
+      responseType: "" | "arraybuffer" | "json",
+    ): Promise<string> => {
+      await endpoint.send("Network.enable");
+      const url = `${harness.appOrigin}${path}`;
+      const requestEvent = endpoint.waitForEvent(
+        "Network.requestWillBeSent",
+        (params) => params.request?.url === url,
+      );
+      await endpoint.send("Runtime.evaluate", {
+        expression: `new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open("GET", ${JSON.stringify(url)});
+          xhr.responseType = ${JSON.stringify(responseType)};
+          xhr.onload = () => resolve(true);
+          xhr.onerror = () => reject(new Error("XHR failed"));
+          xhr.send();
+        })`,
+        awaitPromise: true,
+      });
+      const requestId = String((await requestEvent).requestId);
+      await waitUntil(
+        async () =>
+          endpoint.events.some(
+            (event) =>
+              event.method === "Network.loadingFinished" && event.params?.requestId === requestId,
+          )
+            ? true
+            : undefined,
+        `XHR completion for ${path}`,
+      );
+      return requestId;
+    };
+
+    const nativeBinary = await runXhr(harness.native, "/xhr-binary", "");
+    expect(
+      await harness.native.send("Network.getResponseBody", { requestId: nativeBinary }),
+    ).toEqual({
+      body: "AP8B",
+      base64Encoded: true,
+    });
+    const icdpBinary = await runXhr(harness.icdp, "/xhr-binary", "");
+    expect(
+      (await harness.icdp.request("Network.getResponseBody", { requestId: icdpBinary })).error,
+    ).toEqual({
+      code: -32000,
+      message: "No resource with given identifier found",
+    });
+
+    const nativeJson = await runXhr(harness.native, "/xhr-json", "json");
+    expect(await harness.native.send("Network.getResponseBody", { requestId: nativeJson })).toEqual(
+      {
+        body: XHR_JSON_BODY,
+        base64Encoded: false,
+      },
+    );
+    const icdpJson = await runXhr(harness.icdp, "/xhr-json", "json");
+    expect(
+      (await harness.icdp.request("Network.getResponseBody", { requestId: icdpJson })).error,
+    ).toEqual({
+      code: -32000,
+      message: "No resource with given identifier found",
+    });
+
+    for (const endpoint of [harness.native, harness.icdp]) {
+      const textRequestId = await runXhr(endpoint, "/data", "arraybuffer");
+      expect(await endpoint.send("Network.getResponseBody", { requestId: textRequestId })).toEqual({
+        body: "parity-response",
+        base64Encoded: false,
+      });
+
+      const requestId = await runXhr(endpoint, "/xhr-binary", "arraybuffer");
+      expect(await endpoint.send("Network.getResponseBody", { requestId })).toEqual({
+        body: "AP8B",
+        base64Encoded: true,
+      });
+
+      const quotedRequestId = await runXhr(endpoint, "/xhr-quoted", "arraybuffer");
+      expect(
+        await endpoint.send("Network.getResponseBody", { requestId: quotedRequestId }),
+      ).toEqual({
+        body: "quoted-charset",
+        base64Encoded: false,
+      });
+
+      const postUrl = `${harness.appOrigin}/data?xhr-post=${endpoint === harness.native ? "native" : "icdp"}`;
+      const postRequest = endpoint.waitForEvent(
+        "Network.requestWillBeSent",
+        (params) => params.request?.url === postUrl,
+      );
+      await endpoint.send("Runtime.evaluate", {
+        expression: `new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open("POST", ${JSON.stringify(postUrl)});
+          xhr.onload = () => resolve(true);
+          xhr.onerror = () => reject(new Error("XHR failed"));
+          xhr.send(new URLSearchParams({ a: "1" }));
+        })`,
+        awaitPromise: true,
+      });
+      const post = (await postRequest).request;
+      const postHeaders = Object.fromEntries(
+        Object.entries(post.headers).map(([name, value]) => [name.toLowerCase(), value]),
+      );
+      expect({ ...post, headers: postHeaders }).toMatchObject({
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
+        },
+        hasPostData: true,
+        postData: "a=1",
+      });
+    }
+  } finally {
+    await harness.close();
+  }
+}, 120_000);
+
 test("Storage reports real usage and quota for the current frame origin", async () => {
   const harness = await createParityHarness();
   try {
@@ -3622,6 +4276,59 @@ test("Page enable does not replay completed lifecycle events and reports its fra
 
     await exercise(harness.native);
     await exercise(harness.icdp);
+  } finally {
+    await harness.close();
+  }
+}, 120_000);
+
+test("Page instrumentation preserves History URL coercion and native errors", async () => {
+  const harness = await createParityHarness();
+  try {
+    const exercise = async (endpoint: CdpEndpoint, source: string) => {
+      await endpoint.send("Page.enable");
+      const marker = `history-coercion-1?source=${source}`;
+      const navigation = endpoint.waitForEvent("Page.navigatedWithinDocument", (params) =>
+        params.url?.includes(marker),
+      );
+      const result = await endpoint.send("Runtime.evaluate", {
+        expression: `(() => {
+          let coercions = 0;
+          const url = {
+            toString() {
+              coercions++;
+              return "/history-coercion-" + coercions + "?source=${source}";
+            }
+          };
+          history.pushState({}, "", url);
+          let invalidName = "";
+          try {
+            history.pushState({}, "", "http://[");
+          } catch (error) {
+            invalidName = error.name;
+          }
+          return { coercions, href: location.href, invalidName };
+        })()`,
+        returnByValue: true,
+      });
+      expect(result.result.value).toEqual({
+        coercions: 1,
+        href: `${harness.appOrigin}/${marker}`,
+        invalidName: "SecurityError",
+      });
+      expect(await navigation).toMatchObject({
+        navigationType: "historyApi",
+        url: `${harness.appOrigin}/${marker}`,
+      });
+      expect(
+        endpoint.events.filter(
+          (event) =>
+            event.method === "Page.navigatedWithinDocument" && event.params?.url?.includes(marker),
+        ),
+      ).toHaveLength(1);
+    };
+
+    await exercise(harness.native, "native");
+    await exercise(harness.icdp, "icdp");
   } finally {
     await harness.close();
   }

@@ -14,6 +14,30 @@ async function until(predicate: () => boolean, what: string, timeoutMs = 3000): 
   }
 }
 
+async function openWebSocket(url: string): Promise<WebSocket> {
+  const socket = new WebSocket(url);
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timed out opening ${url}`)), 3000);
+    socket.addEventListener(
+      "open",
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      { once: true },
+    );
+    socket.addEventListener(
+      "error",
+      () => {
+        clearTimeout(timer);
+        reject(new Error(`failed to open ${url}`));
+      },
+      { once: true },
+    );
+  });
+  return socket;
+}
+
 function fakeWindow() {
   const listeners = new Set<(event: MessageEvent) => void>();
   const win: WindowLike = {
@@ -315,4 +339,49 @@ describe("relay + host + frame, end to end", () => {
       false,
     );
   });
+});
+
+test("Relay canonicalizes configured WebSocket paths before advertising them", async () => {
+  const relay = await serveRelay({
+    browserPath: String.raw`\\relay.test\browser socket`,
+    hostPath: String.raw`\\relay.test\host socket`,
+    targetPathPrefix: "//evil.example/page socket/",
+  });
+  const sockets: WebSocket[] = [];
+  try {
+    expect(new URL(relay.browserWsUrl).pathname).toBe("/relay.test/browser%20socket");
+    expect(new URL(relay.hostWsUrl).pathname).toBe("/relay.test/host%20socket");
+
+    const host = await openWebSocket(relay.hostWsUrl);
+    sockets.push(host);
+    host.send(
+      JSON.stringify({
+        kind: "ready",
+        v: 5,
+        instanceId: "custom-path-host",
+        targets: [
+          {
+            targetId: "a/b😀",
+            title: "Custom path target",
+            url: "http://app.test/",
+          },
+        ],
+      }),
+    );
+    host.send(JSON.stringify({ kind: "readyComplete" }));
+    await until(() => relay.core.status().targets.length === 1, "custom-path Host target");
+
+    sockets.push(await openWebSocket(relay.browserWsUrl));
+    const list = (await (
+      await fetch(`http://127.0.0.1:${relay.browserPort}/json/list`)
+    ).json()) as Array<{ webSocketDebuggerUrl: string }>;
+    expect(new URL(list[0]!.webSocketDebuggerUrl).origin).toBe(new URL(relay.browserWsUrl).origin);
+    expect(new URL(list[0]!.webSocketDebuggerUrl).pathname).toBe(
+      "/evil.example/page%20socket/a%2Fb%F0%9F%98%80",
+    );
+    sockets.push(await openWebSocket(list[0]!.webSocketDebuggerUrl));
+  } finally {
+    for (const socket of sockets) socket.close();
+    await relay.stop();
+  }
 });

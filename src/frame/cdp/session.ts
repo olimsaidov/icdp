@@ -460,9 +460,6 @@ function nestedRuntimeParamError(method: string, params: Record<string, unknown>
 class FrameSession {
   readonly nodes: SessionNodeRegistry;
   readonly enabledDomains = new Set<string>();
-  private pressedElement: Element | undefined;
-  private hoveredElement: Element | undefined;
-  private suppressCompatibilityMouse = false;
   private readonly detachedNodes = new WeakSet<Node>();
   private readonly objects: RemoteObjectStore;
   private nextExceptionId = 1;
@@ -1317,18 +1314,28 @@ class FrameSession {
       );
     };
     if (type === "mouseMoved") {
-      if (this.hoveredElement !== target) {
-        if (this.hoveredElement) {
-          dispatchPointer(this.hoveredElement, "pointerout", true, target);
-          dispatchPointer(this.hoveredElement, "pointerleave", false, target);
+      if (this.backend.inputState.hoveredElement !== target) {
+        if (this.backend.inputState.hoveredElement) {
+          dispatchPointer(this.backend.inputState.hoveredElement, "pointerout", true, target);
+          dispatchPointer(this.backend.inputState.hoveredElement, "pointerleave", false, target);
         }
-        dispatchPointer(target, "pointerover", true, this.hoveredElement ?? null);
-        dispatchPointer(target, "pointerenter", false, this.hoveredElement ?? null);
-        if (!this.suppressCompatibilityMouse) {
-          this.hoveredElement?.dispatchEvent(
+        dispatchPointer(
+          target,
+          "pointerover",
+          true,
+          this.backend.inputState.hoveredElement ?? null,
+        );
+        dispatchPointer(
+          target,
+          "pointerenter",
+          false,
+          this.backend.inputState.hoveredElement ?? null,
+        );
+        if (!this.backend.inputState.suppressCompatibilityMouse) {
+          this.backend.inputState.hoveredElement?.dispatchEvent(
             new view.MouseEvent("mouseout", { ...init, relatedTarget: target }),
           );
-          this.hoveredElement?.dispatchEvent(
+          this.backend.inputState.hoveredElement?.dispatchEvent(
             new view.MouseEvent("mouseleave", {
               ...init,
               bubbles: false,
@@ -1338,32 +1345,33 @@ class FrameSession {
           target.dispatchEvent(
             new view.MouseEvent("mouseover", {
               ...init,
-              relatedTarget: this.hoveredElement ?? null,
+              relatedTarget: this.backend.inputState.hoveredElement ?? null,
             }),
           );
           target.dispatchEvent(
             new view.MouseEvent("mouseenter", {
               ...init,
               bubbles: false,
-              relatedTarget: this.hoveredElement ?? null,
+              relatedTarget: this.backend.inputState.hoveredElement ?? null,
             }),
           );
         }
-        this.hoveredElement = target;
+        this.backend.inputState.hoveredElement = target;
       }
       dispatchPointer(target, "pointermove");
-      if (!this.suppressCompatibilityMouse) {
+      if (!this.backend.inputState.suppressCompatibilityMouse) {
         target.dispatchEvent(new view.MouseEvent("mousemove", init));
       }
       return;
     }
     if (type === "mousePressed") {
-      this.pressedElement = target;
+      this.backend.inputState.pressedElement = target;
       const pointerAllowed = dispatchPointer(target, "pointerdown");
       const disabledControl = target.closest(":disabled");
-      this.suppressCompatibilityMouse = !pointerAllowed || disabledControl !== null;
+      this.backend.inputState.suppressCompatibilityMouse =
+        !pointerAllowed || disabledControl !== null;
       const shouldFocus =
-        !this.suppressCompatibilityMouse &&
+        !this.backend.inputState.suppressCompatibilityMouse &&
         target.dispatchEvent(new view.MouseEvent("mousedown", init));
       const focusTarget = target.closest<HTMLElement>(
         "button,input,select,textarea,a[href],summary,[tabindex],[contenteditable]",
@@ -1383,11 +1391,11 @@ class FrameSession {
     }
     if (type === "mouseReleased") {
       dispatchPointer(target, "pointerup");
-      if (!this.suppressCompatibilityMouse) {
+      if (!this.backend.inputState.suppressCompatibilityMouse) {
         target.dispatchEvent(new view.MouseEvent("mouseup", init));
       }
-      const clickTarget = this.pressedElement
-        ? nearestCommonAncestor(this.pressedElement, target)
+      const clickTarget = this.backend.inputState.pressedElement
+        ? nearestCommonAncestor(this.backend.inputState.pressedElement, target)
         : undefined;
       const disabledControl = clickTarget?.closest(":disabled");
       if (clickTarget) {
@@ -1414,8 +1422,8 @@ class FrameSession {
           clickTarget.dispatchEvent(new view.MouseEvent("dblclick", init));
         }
       }
-      this.pressedElement = undefined;
-      this.suppressCompatibilityMouse = false;
+      this.backend.inputState.pressedElement = undefined;
+      this.backend.inputState.suppressCompatibilityMouse = false;
       return;
     }
     if (type === "mouseWheel") {
@@ -2139,6 +2147,23 @@ function boxModel(element: Element): Protocol.DOM.BoxModel {
 
 function boxModelForNode(node: Node): Protocol.DOM.BoxModel {
   if (!node.isConnected) throw new Error("Could not compute box model.");
+  let element: Element | null = node instanceof Element ? node : node.parentElement;
+  if (!element) {
+    const root = node.getRootNode();
+    if (root instanceof ShadowRoot) element = root.host;
+  }
+  for (; element; ) {
+    const style = getComputedStyle(element);
+    if (
+      [style.transform, style.rotate, style.scale, style.translate, style.offsetPath].some(
+        (value) => value && value !== "none",
+      )
+    ) {
+      throw new Error("Could not compute box model.");
+    }
+    const root = element.getRootNode();
+    element = element.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
+  }
   if (node instanceof Text) {
     const range = node.ownerDocument.createRange();
     range.selectNodeContents(node);
@@ -2164,6 +2189,11 @@ function boxModelForNode(node: Node): Protocol.DOM.BoxModel {
 
 export class FrameBackend {
   readonly backendNodes: DomRegistry;
+  readonly inputState: {
+    hoveredElement?: Element;
+    pressedElement?: Element;
+    suppressCompatibilityMouse: boolean;
+  } = { suppressCompatibilityMouse: false };
   private readonly sessions = new Map<string, FrameSession>();
   private readonly consoleBacklog: ConsoleRecord[] = [];
   private readonly send: FrameBackendOptions["send"];
@@ -2179,6 +2209,7 @@ export class FrameBackend {
   private readonly onPageShow = (event: PageTransitionEvent): void => {
     if (event.persisted) this.recordPageNavigation("BackForwardCacheRestore");
   };
+  private historyApiNavigationDepth = 0;
   private historyApiNavigationUrl: string | undefined;
   private pageNavigateFragmentUrl: string | undefined;
   private pendingPageNavigationLoaderId: string | undefined;
@@ -2329,11 +2360,6 @@ export class FrameBackend {
     )?.navigation;
     if (!navigation) return;
     const history = this.document.defaultView!.history;
-    const markHistoryApiNavigation = (url: string | URL | null | undefined): string => {
-      const href = url == null ? this.document.URL : new URL(String(url), this.document.URL).href;
-      this.historyApiNavigationUrl = href;
-      return href;
-    };
     const clearHistoryApiNavigation = (href: string): void => {
       if (this.historyApiNavigationUrl === href) {
         this.historyApiNavigationUrl = undefined;
@@ -2347,23 +2373,31 @@ export class FrameBackend {
         session.pageNavigatedWithinDocument(navigationType, url);
       }
     };
+    const invokeHistoryMethod = (
+      original: History["pushState"] | History["replaceState"],
+      receiver: History,
+      args: [data: unknown, unused: string, url?: string | URL | null],
+    ): void => {
+      this.historyApiNavigationDepth += 1;
+      try {
+        Reflect.apply(original, receiver, args);
+      } catch (error) {
+        this.historyApiNavigationDepth -= 1;
+        throw error;
+      }
+      const href = this.document.URL;
+      this.historyApiNavigationUrl = href;
+      this.historyApiNavigationDepth -= 1;
+      emitSameDocumentNavigation("historyApi", href);
+      queueMicrotask(() => clearHistoryApiNavigation(href));
+    };
     const wrapHistoryMethod = <T extends "pushState" | "replaceState">(method: T): void => {
       const original = history[method];
       history[method] = function (
         this: History,
-        data: unknown,
-        unused: string,
-        url?: string | URL | null,
+        ...args: [data: unknown, unused: string, url?: string | URL | null]
       ): void {
-        const href = markHistoryApiNavigation(url);
-        try {
-          Reflect.apply(original, this, [data, unused, url]);
-        } catch (error) {
-          clearHistoryApiNavigation(href);
-          throw error;
-        }
-        emitSameDocumentNavigation("historyApi", href);
-        queueMicrotask(() => clearHistoryApiNavigation(href));
+        invokeHistoryMethod(original, this, args);
       } as History[T];
     };
     wrapHistoryMethod("pushState");
@@ -2377,8 +2411,12 @@ export class FrameBackend {
       if (!event.destination?.url) return;
       const pageNavigateFragment = this.pageNavigateFragmentUrl === event.destination.url;
       this.pageNavigateFragmentUrl = undefined;
-      const historyApiNavigation = this.historyApiNavigationUrl === event.destination.url;
-      this.historyApiNavigationUrl = undefined;
+      const historyApiNavigation =
+        this.historyApiNavigationDepth > 0 ||
+        this.historyApiNavigationUrl === event.destination.url;
+      if (this.historyApiNavigationUrl === event.destination.url) {
+        this.historyApiNavigationUrl = undefined;
+      }
       if (historyApiNavigation) return;
       const type =
         pageNavigateFragment || event.hashChange || event.navigationType === "traverse"

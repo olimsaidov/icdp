@@ -74,13 +74,11 @@ test("reports a schema-complete fetch lifecycle with one stable request id and b
   );
   observer.install();
 
-  const returned = window.fetch("https://example.test/api", {
-    body: "ping",
-    headers: { "x-request": "yes" },
-    method: "POST",
-  });
+  const input = "https://example.test/api";
+  const returned = window.fetch(input);
 
   expect(returned).toBe(nativePromise);
+  expect(nativeFetch).toHaveBeenCalledWith(input);
   await vi.waitFor(() => {
     expect(events.map((event) => event.method)).toEqual([
       "Network.requestWillBeSent",
@@ -96,10 +94,8 @@ test("reports a schema-complete fetch lifecycle with one stable request id and b
     documentURL: expect.any(String),
     request: {
       url: "https://example.test/api",
-      method: "POST",
-      headers: { "x-request": "yes" },
-      postData: "ping",
-      hasPostData: true,
+      method: "GET",
+      headers: {},
       initialPriority: "High",
       referrerPolicy: "strict-origin-when-cross-origin",
     },
@@ -147,6 +143,156 @@ test("reports a schema-complete fetch lifecycle with one stable request id and b
     body: "hello",
     base64Encoded: false,
   });
+});
+
+test("preserves fetch promise rejection for an invalid URL", async () => {
+  const nativeFetch = vi.fn(() =>
+    Promise.reject(new TypeError("Failed to parse URL")),
+  ) as unknown as typeof fetch;
+  Object.defineProperty(window, "fetch", {
+    configurable: true,
+    value: nativeFetch,
+    writable: true,
+  });
+  const events: EmittedEvent[] = [];
+  const observer = new NetworkObserver(window, (method, params) => events.push({ method, params }));
+  observer.install();
+
+  const request = window.fetch("http://[");
+
+  await expect(request).rejects.toThrow("Failed to parse URL");
+  expect(events).toEqual([]);
+  observer.uninstall();
+});
+
+test("preserves an exotic fetch input without re-coercing it", async () => {
+  const previousRequest = (window as unknown as { Request?: typeof Request }).Request;
+  Object.defineProperty(window, "Request", {
+    configurable: true,
+    value: Request,
+    writable: true,
+  });
+  try {
+    let coercions = 0;
+    const nativeFetch = vi.fn((input: RequestInfo | URL) => {
+      const url = input instanceof Request ? input.url : String(input);
+      return Promise.resolve({
+        clone() {
+          return this;
+        },
+        headers: headers({ "content-length": "2", "content-type": "text/plain" }),
+        status: 200,
+        statusText: "OK",
+        text: () => Promise.resolve("ok"),
+        url,
+      } as unknown as Response);
+    }) as unknown as typeof fetch;
+    Object.defineProperty(window, "fetch", {
+      configurable: true,
+      value: nativeFetch,
+      writable: true,
+    });
+    const events: EmittedEvent[] = [];
+    const observer = new NetworkObserver(window, (method, params) =>
+      events.push({ method, params }),
+    );
+    observer.install();
+    const input = {
+      toString() {
+        coercions += 1;
+        return `https://example.test/coercion-${coercions}`;
+      },
+    };
+
+    await window.fetch(input as RequestInfo);
+
+    expect(coercions).toBe(1);
+    expect(nativeFetch).toHaveBeenCalledWith(input);
+    expect(events).toEqual([]);
+    observer.uninstall();
+  } finally {
+    if (previousRequest) {
+      Object.defineProperty(window, "Request", {
+        configurable: true,
+        value: previousRequest,
+        writable: true,
+      });
+    } else {
+      delete (window as unknown as { Request?: typeof Request }).Request;
+    }
+  }
+});
+
+test("preserves fetch init accessors and skips observation rather than rereading them", async () => {
+  const previousRequest = (window as unknown as { Request?: typeof Request }).Request;
+  Object.defineProperty(window, "Request", {
+    configurable: true,
+    value: Request,
+    writable: true,
+  });
+  try {
+    const nativeFetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      return Promise.resolve({
+        clone() {
+          return this;
+        },
+        headers: headers({ "content-length": "2", "content-type": "text/plain" }),
+        status: 200,
+        statusText: "OK",
+        text: () => Promise.resolve("ok"),
+        url: request.url,
+      } as unknown as Response);
+    }) as unknown as typeof fetch;
+    Object.defineProperty(window, "fetch", {
+      configurable: true,
+      value: nativeFetch,
+      writable: true,
+    });
+    const reads = { headers: 0, method: 0, referrerPolicy: 0, signal: 0 };
+    const controller = new AbortController();
+    const init = {
+      get headers() {
+        reads.headers += 1;
+        return { "x-read": String(reads.headers) };
+      },
+      get method() {
+        reads.method += 1;
+        return reads.method === 1 ? "GET" : "POST";
+      },
+      get referrerPolicy() {
+        reads.referrerPolicy += 1;
+        return reads.referrerPolicy === 1 ? "no-referrer" : "unsafe-url";
+      },
+      get signal() {
+        reads.signal += 1;
+        return controller.signal;
+      },
+    } satisfies RequestInit;
+    const events: EmittedEvent[] = [];
+    const observer = new NetworkObserver(window, (method, params) =>
+      events.push({ method, params }),
+    );
+    observer.install();
+
+    const input = "https://example.test/init";
+    await window.fetch(input, init);
+
+    expect(reads).toEqual({ headers: 1, method: 1, referrerPolicy: 1, signal: 1 });
+    expect(nativeFetch).toHaveBeenCalledWith(input, init);
+    expect(events).toEqual([]);
+    observer.uninstall();
+  } finally {
+    if (previousRequest) {
+      Object.defineProperty(window, "Request", {
+        configurable: true,
+        value: previousRequest,
+        writable: true,
+      });
+    } else {
+      delete (window as unknown as { Request?: typeof Request }).Request;
+    }
+  }
 });
 
 test("omits dataReceived for empty 204 and Content-Length zero fetch responses", async () => {
@@ -363,10 +509,10 @@ test("reports XHR with stable lifecycle fields while preserving native method ca
   observer.install();
 
   const xhr = new window.XMLHttpRequest() as unknown as FakeXMLHttpRequest;
-  const url = new URL("https://example.test/xhr");
+  const url = "https://example.test/xhr";
   const open = xhr.open as unknown as (
     method: string,
-    url: URL,
+    url: string,
     async: boolean,
     username: string,
     password: string,
@@ -428,10 +574,77 @@ test("reports XHR with stable lifecycle fields while preserving native method ca
   expect(FakeXMLHttpRequest.prototype.setRequestHeader).toBe(nativeSetRequestHeader);
 });
 
+test("XHR instrumentation does not recoerce open or header arguments", async () => {
+  class FakeXMLHttpRequest extends EventTarget {
+    responseText = "ok";
+    responseType: XMLHttpRequestResponseType = "";
+    responseURL = "https://example.test/xhr";
+    status = 200;
+    statusText = "OK";
+
+    open(method: unknown, url: unknown): void {
+      String(method);
+      String(url);
+    }
+
+    setRequestHeader(name: unknown, value: unknown): void {
+      String(name);
+      String(value);
+    }
+
+    send(): void {
+      queueMicrotask(() => this.dispatchEvent(new Event("load")));
+    }
+
+    getAllResponseHeaders(): string {
+      return "Content-Type: text/plain\r\n";
+    }
+  }
+
+  Object.defineProperty(window, "XMLHttpRequest", {
+    configurable: true,
+    value: FakeXMLHttpRequest,
+    writable: true,
+  });
+  const events: EmittedEvent[] = [];
+  const observer = new NetworkObserver(window, (method, params) => events.push({ method, params }));
+  observer.install();
+  const counts = { headerName: 0, headerValue: 0, method: 0, url: 0 };
+  const convertible = (name: keyof typeof counts, value: string) => ({
+    toString() {
+      counts[name] += 1;
+      return value;
+    },
+  });
+
+  const exoticOpen = new window.XMLHttpRequest();
+  (exoticOpen.open as unknown as (method: unknown, url: unknown) => void)(
+    convertible("method", "GET"),
+    convertible("url", "https://example.test/exotic-open"),
+  );
+  exoticOpen.send();
+
+  const exoticHeader = new window.XMLHttpRequest();
+  exoticHeader.open("GET", "https://example.test/exotic-header");
+  expect(() =>
+    (exoticHeader.setRequestHeader as unknown as (name: unknown, value: unknown) => void)(
+      convertible("headerName", "X-Probe"),
+      convertible("headerValue", "yes"),
+    ),
+  ).not.toThrow();
+  exoticHeader.send();
+  await Promise.resolve();
+
+  expect(counts).toEqual({ headerName: 1, headerValue: 1, method: 1, url: 1 });
+  expect(events).toEqual([]);
+  observer.uninstall();
+});
+
 // Ported from Chromium's response-body preservation behavior:
 // third_party/blink/renderer/core/inspector/inspector_page_agent.cc
-test("returns XHR ArrayBuffer and Blob response bodies as base64", async () => {
+test("encodes XHR ArrayBuffer and Blob response bodies according to response MIME", async () => {
   class FakeXMLHttpRequest extends EventTarget {
+    contentType = "application/octet-stream";
     response: unknown;
     responseText = "";
     responseType: XMLHttpRequestResponseType = "";
@@ -447,7 +660,7 @@ test("returns XHR ArrayBuffer and Blob response bodies as base64", async () => {
     }
 
     getAllResponseHeaders(): string {
-      return "Content-Type: application/octet-stream\r\n";
+      return `Content-Type: ${this.contentType}\r\n`;
     }
   }
 
@@ -503,23 +716,42 @@ test("returns XHR ArrayBuffer and Blob response bodies as base64", async () => {
     base64Encoded: true,
   });
 
+  const textXhr = new window.XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+  textXhr.open("GET", "https://example.test/xhr-text-arraybuffer");
+  textXhr.contentType = 'text/plain; charset="utf-8"';
+  textXhr.responseType = "arraybuffer";
+  textXhr.response = new TextEncoder().encode("text array").buffer;
+  textXhr.send();
+
+  await vi.waitFor(() => {
+    expect(events.filter((event) => event.method === "Network.loadingFinished")).toHaveLength(3);
+  });
+  const textRequestId = events.find(
+    (event) =>
+      event.method === "Network.requestWillBeSent" &&
+      event.params.request.url.endsWith("/xhr-text-arraybuffer"),
+  )!.params.requestId;
+  expect(observer.getResponseBody(textRequestId)).toEqual({
+    body: "text array",
+    base64Encoded: false,
+  });
+
   const mimeXhr = new window.XMLHttpRequest() as unknown as FakeXMLHttpRequest;
   mimeXhr.open("GET", "https://example.test/xhr-mime");
   mimeXhr.responseText = "mime";
   mimeXhr.send();
 
   await vi.waitFor(() => {
-    expect(events.filter((event) => event.method === "Network.loadingFinished")).toHaveLength(3);
+    expect(events.filter((event) => event.method === "Network.loadingFinished")).toHaveLength(4);
   });
   const mimeRequestId = events.find(
     (event) =>
       event.method === "Network.requestWillBeSent" &&
       event.params.request.url.endsWith("/xhr-mime"),
   )!.params.requestId;
-  expect(observer.getResponseBody(mimeRequestId)).toEqual({
-    body: "bWltZQ==",
-    base64Encoded: true,
-  });
+  expect(() => observer.getResponseBody(mimeRequestId)).toThrow(
+    "No resource with given identifier found",
+  );
   observer.uninstall();
 });
 
@@ -726,7 +958,7 @@ test("serializes async WebSocket frames before close and releases the socket wra
 
 test("evicts retained bodies independently by oldest count and UTF-8 bytes", async () => {
   const nativeFetch = vi.fn((input: RequestInfo | URL) => {
-    const url = String(input);
+    const url = input instanceof Request ? input.url : String(input);
     const body = decodeURIComponent(new URL(url).pathname.slice(1));
     return Promise.resolve({
       clone() {

@@ -465,6 +465,61 @@ test("DOM.getBoxModel preserves fractional quad coordinates", async () => {
   });
 });
 
+test("DOM.getBoxModel rejects transformed elements and text instead of returning an axis-aligned lie", async () => {
+  document.body.innerHTML =
+    '<div style="transform:rotate(30deg)">Rotated text</div><button style="rotate:30deg">Save</button><aside style="offset-path:path(\'M 0 0 L 100 100\')">Motion</aside>';
+  const text = document.querySelector("div")!.firstChild!;
+  const button = document.querySelector("button")!;
+  const motion = document.querySelector("aside")!;
+  const shadowHost = document.createElement("section");
+  shadowHost.style.transform = "rotate(30deg)";
+  const shadowText = document.createTextNode("Shadow text");
+  shadowHost.attachShadow({ mode: "open" }).append(shadowText);
+  document.body.append(shadowHost);
+  const messages: any[] = [];
+  const backend = new FrameBackend({
+    document,
+    send: (message) => messages.push(message),
+  });
+  backend.attach("session-a", []);
+
+  await backend.command({
+    kind: "command",
+    sessionId: "session-a",
+    id: 902,
+    method: "DOM.getBoxModel",
+    params: { backendNodeId: backend.backendNodes.backendIdFor(text) },
+  });
+  await backend.command({
+    kind: "command",
+    sessionId: "session-a",
+    id: 903,
+    method: "DOM.getBoxModel",
+    params: { backendNodeId: backend.backendNodes.backendIdFor(button) },
+  });
+  await backend.command({
+    kind: "command",
+    sessionId: "session-a",
+    id: 904,
+    method: "DOM.getBoxModel",
+    params: { backendNodeId: backend.backendNodes.backendIdFor(motion) },
+  });
+  await backend.command({
+    kind: "command",
+    sessionId: "session-a",
+    id: 905,
+    method: "DOM.getBoxModel",
+    params: { backendNodeId: backend.backendNodes.backendIdFor(shadowText) },
+  });
+
+  for (const message of messages) {
+    expect(message.error).toEqual({
+      code: -32000,
+      message: "Could not compute box model.",
+    });
+  }
+});
+
 // Ported from Chromium's DOM mutation event tests. A session receives events
 // only for frontend nodes it has requested.
 test("DOM mutation events follow bound nodes and per-session enablement", async () => {
@@ -813,6 +868,53 @@ test("same-document transport restoration does not turn Page.enable into navigat
   backend.attach("session-a", ["Page"]);
 
   expect(messages.filter((message) => message.kind === "event")).toEqual([]);
+});
+
+test("History instrumentation preserves native URL coercion and errors", () => {
+  const originalPushState = history.pushState;
+  const originalReplaceState = history.replaceState;
+  const originalUrl = location.href;
+  Object.defineProperty(window, "navigation", {
+    configurable: true,
+    value: new EventTarget(),
+  });
+  try {
+    const messages: any[] = [];
+    const backend = new FrameBackend({
+      document,
+      send: (message) => messages.push(message),
+    });
+    backend.attach("session-a", ["Page"]);
+    messages.length = 0;
+    let coercions = 0;
+    const url = {
+      toString() {
+        coercions += 1;
+        return `#coercion-${coercions}`;
+      },
+    };
+
+    history.pushState(null, "", url as unknown as string);
+
+    expect(coercions).toBe(1);
+    expect(location.hash).toBe("#coercion-1");
+    expect(messages).toMatchObject([
+      {
+        kind: "event",
+        method: "Page.navigatedWithinDocument",
+        params: { navigationType: "historyApi", url: location.href },
+        sessionId: "session-a",
+      },
+    ]);
+    expect(() => history.pushState(null, "", "http://[")).toThrowError(
+      expect.objectContaining({ name: "SecurityError" }),
+    );
+  } finally {
+    history.pushState = originalPushState;
+    history.replaceState = originalReplaceState;
+    Reflect.apply(originalReplaceState, history, [null, "", originalUrl]);
+    delete (window as unknown as { navigation?: EventTarget }).navigation;
+  }
 });
 
 test("a restored Page domain reports the replacement frame navigation", () => {
@@ -1323,6 +1425,38 @@ test("Input.dispatchMouseEvent preserves the pressed target for click synthesis"
     kind: "command",
     sessionId: "session-a",
     id: 18,
+    method: "Input.dispatchMouseEvent",
+    params: { type: "mouseReleased", x: 10, y: 10, button: "left", buttons: 0 },
+  });
+
+  expect(clicks).toBe(1);
+});
+
+test("Input mouse state survives a Session handoff", async () => {
+  document.body.innerHTML = "<button>Save</button>";
+  const button = document.querySelector("button")!;
+  Object.defineProperty(document, "elementFromPoint", {
+    configurable: true,
+    value: () => button,
+  });
+  let clicks = 0;
+  button.addEventListener("click", () => clicks++);
+  const backend = new FrameBackend({ document, send: () => {} });
+  backend.attach("session-a", []);
+  backend.attach("session-b", []);
+
+  await backend.command({
+    kind: "command",
+    sessionId: "session-a",
+    id: 171,
+    method: "Input.dispatchMouseEvent",
+    params: { type: "mousePressed", x: 10, y: 10, button: "left", buttons: 1 },
+  });
+  backend.detach("session-a");
+  await backend.command({
+    kind: "command",
+    sessionId: "session-b",
+    id: 172,
     method: "Input.dispatchMouseEvent",
     params: { type: "mouseReleased", x: 10, y: 10, button: "left", buttons: 0 },
   });

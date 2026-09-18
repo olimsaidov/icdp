@@ -154,6 +154,16 @@ describe("handshake", () => {
     expect(host.targets().map((target) => target.targetId)).toEqual(["preview"]);
   });
 
+  test.each(["", ".", "..", "\uD800"])("pair() rejects unusable Target id %j", (targetId) => {
+    const { win } = fakeWindow();
+    const host = new IcdpHost(win);
+
+    expect(() => host.pair(fakeIframe().iframe, { targetId, origins: "*" })).toThrow(
+      "Target id is not usable in a debugger URL",
+    );
+    expect(host.targets()).toEqual([]);
+  });
+
   test("hello from a non-allowlisted origin is ignored", () => {
     const { win, emit } = fakeWindow();
     const host = new IcdpHost(win);
@@ -691,6 +701,16 @@ describe("relay uplink lifecycle", () => {
         message: JSON.stringify({ id: 1, method: "Browser.getVersion" }),
       }),
     ).not.toThrow();
+    socket.message({
+      kind: "clients",
+      clientIds: ["invalid-target-client"],
+      targetIds: { "invalid-target-client": "." },
+    });
+    socket.message({
+      kind: "clientMessage",
+      clientId: "invalid-target-client",
+      message: JSON.stringify({ id: 2, method: "Browser.getVersion" }),
+    });
     await flush();
 
     expect(
@@ -698,6 +718,65 @@ describe("relay uplink lifecycle", () => {
         .map((raw) => JSON.parse(raw) as Record<string, unknown>)
         .filter((message) => message.kind === "clientMessage"),
     ).toEqual([]);
+  });
+
+  test("reentrant Target listeners preserve Relay lifecycle order", () => {
+    const { win } = fakeWindow();
+    const host = new IcdpHost(win);
+    const socket = new FakeSocket();
+    host.connectRelay({
+      url: "ws://relay.test/icdp/host",
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+    socket.open();
+    host.onTargets((event) => {
+      if (event.kind === "targetCreated") host.unpair(event.target.targetId);
+    });
+    const observed: string[] = [];
+    host.onTargets((event) => observed.push(event.kind));
+
+    host.pair(fakeIframe().iframe, { targetId: "reentrant", origins: "*" });
+
+    expect(
+      socket.sent
+        .map((raw) => JSON.parse(raw) as { kind?: string })
+        .filter((message) => message.kind === "targetCreated" || message.kind === "targetDestroyed")
+        .map((message) => message.kind),
+    ).toEqual(["targetCreated", "targetDestroyed"]);
+    expect(observed).toEqual(["targetCreated", "targetDestroyed"]);
+    expect(host.targets()).toEqual([]);
+  });
+
+  test("listener failures do not drop queued Target lifecycle events", () => {
+    const { win } = fakeWindow();
+    const host = new IcdpHost(win);
+    const socket = new FakeSocket();
+    host.connectRelay({
+      url: "ws://relay.test/icdp/host",
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+    socket.open();
+    host.onTargets((event) => {
+      if (event.kind === "targetCreated") host.unpair(event.target.targetId);
+    });
+    host.onTargets((event) => {
+      if (event.kind === "targetCreated") throw new Error("listener failed");
+    });
+    const observed: string[] = [];
+    host.onTargets((event) => observed.push(event.kind));
+
+    expect(() =>
+      host.pair(fakeIframe().iframe, { targetId: "throwing-listener", origins: "*" }),
+    ).toThrow("listener failed");
+
+    expect(
+      socket.sent
+        .map((raw) => JSON.parse(raw) as { kind?: string })
+        .filter((message) => message.kind === "targetCreated" || message.kind === "targetDestroyed")
+        .map((message) => message.kind),
+    ).toEqual(["targetCreated", "targetDestroyed"]);
+    expect(observed).toEqual(["targetCreated", "targetDestroyed"]);
+    expect(host.targets()).toEqual([]);
   });
 
   test("Host owns browser and Target dispatch for Relay Clients", async () => {
@@ -725,6 +804,32 @@ describe("relay uplink lifecycle", () => {
       result: {
         targetInfos: [{ targetId: "preview", type: "page" }],
       },
+    });
+  });
+
+  test("Relay Client ids do not inherit direct Target mappings", async () => {
+    const { host } = await connect();
+    const socket = new FakeSocket();
+    host.connectRelay({
+      url: "ws://relay.test/icdp/host",
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+    socket.open();
+    socket.message({ kind: "clients", clientIds: ["toString"] });
+    socket.message({
+      kind: "clientMessage",
+      clientId: "toString",
+      message: JSON.stringify({ id: 8, method: "Target.getTargetInfo" }),
+    });
+    await flush();
+
+    const response = socket.sent
+      .map((raw) => JSON.parse(raw) as Record<string, unknown>)
+      .filter((message) => message.kind === "clientMessage")
+      .map((message) => JSON.parse(String(message.message)) as CdpMessage)
+      .find((message) => message.id === 8);
+    expect(response?.result).toMatchObject({
+      targetInfo: { targetId: expect.any(String), type: "browser" },
     });
   });
 
@@ -2863,6 +2968,92 @@ describe("target lifecycle hooks", () => {
       host.handleBrowserRequest("Target.closeTarget", { targetId: "preview" }),
     ).resolves.toEqual({ success: true });
     expect(closed).toEqual(["preview"]);
+    expect(host.targets()).toEqual([]);
+  });
+
+  test("concurrent closeTarget requests share one resource close", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const close = vi.fn(() => gate);
+    const { host } = await connect({ host: { onCloseTarget: close } });
+
+    const first = host.handleBrowserRequest("Target.closeTarget", { targetId: "preview" });
+    const second = host.handleBrowserRequest("Target.closeTarget", { targetId: "preview" });
+    const third = gate.then(() =>
+      host.handleBrowserRequest("Target.closeTarget", { targetId: "preview" }),
+    );
+    release();
+
+    await expect(Promise.all([first, second, third])).resolves.toEqual([
+      { success: true },
+      { success: true },
+      { success: true },
+    ]);
+    expect(close).toHaveBeenCalledOnce();
+    expect(host.targets()).toEqual([]);
+  });
+
+  test("concurrent closes do not destroy a replacement Pairing with the same id", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const close = vi.fn(() => gate);
+    const { host } = await connect({ host: { onCloseTarget: close } });
+    const replacement = fakeIframe();
+    let replaced = false;
+    host.onTargets((event) => {
+      if (event.kind !== "targetDestroyed" || replaced) return;
+      replaced = true;
+      host.pair(replacement.iframe, { targetId: event.targetId, origins: "*" });
+    });
+
+    const first = host.handleBrowserRequest("Target.closeTarget", { targetId: "preview" });
+    const second = host.handleBrowserRequest("Target.closeTarget", { targetId: "preview" });
+    release();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { success: true },
+      { success: true },
+    ]);
+    expect(close).toHaveBeenCalledOnce();
+    expect(host.targets()).toEqual([
+      expect.objectContaining({ targetId: "preview", title: "preview" }),
+    ]);
+  });
+
+  test("createTarget rejects when an earlier listener destroys the connected Target", async () => {
+    const { win, emit } = fakeWindow();
+    const frame = fakeIframe();
+    const host = new IcdpHost({
+      window: win,
+      onCreateTarget: () => {
+        host.pair(frame.iframe, { targetId: "destroy-on-connect", origins: [FRAME_ORIGIN] });
+        return "destroy-on-connect";
+      },
+    });
+    host.onTargets((event) => {
+      if (event.kind === "targetInfoChanged") host.unpair(event.target.targetId);
+    });
+
+    const created = host.handleBrowserRequest("Target.createTarget", {
+      url: `${FRAME_ORIGIN}/destroyed`,
+    });
+    await flush();
+    emit({
+      data: {
+        icdp: "hello",
+        v: 5,
+        title: "Destroyed",
+        url: `${FRAME_ORIGIN}/destroyed`,
+      },
+      origin: FRAME_ORIGIN,
+      source: frame.contentWindow,
+    });
+
+    await expect(created).rejects.toThrow("was destroyed before connecting");
     expect(host.targets()).toEqual([]);
   });
 

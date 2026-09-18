@@ -50,17 +50,25 @@ export interface WrapOptions {
 interface StoredObject {
   objectGroup?: string;
   value: unknown;
+  virtual?: "entries" | "entry";
 }
+
+type CollectionEntry = { key?: unknown; value: unknown };
 
 type Getter = (this: unknown) => unknown;
 
 const getPrototypeOf = Object.getPrototypeOf;
 const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const createObject = Object.create;
+const setPrototypeOf = Object.setPrototypeOf;
+const ownKeys = Reflect.ownKeys;
 const functionToString = Function.prototype.toString;
 const objectToString = Object.prototype.toString;
 const functionHasInstance = Function.prototype[Symbol.hasInstance];
 const mapSize = getOwnPropertyDescriptor(Map.prototype, "size")?.get;
 const setSize = getOwnPropertyDescriptor(Set.prototype, "size")?.get;
+const mapForEach = Map.prototype.forEach;
+const setForEach = Set.prototype.forEach;
 const regexpSource = getOwnPropertyDescriptor(RegExp.prototype, "source")?.get;
 const regexpFlags = (
   [
@@ -140,6 +148,48 @@ const errorIsError = (
   }
 ).isError;
 const promiseConstructor = Promise;
+const mapIteratorPrototype = (() => {
+  try {
+    return getPrototypeOf(new Map().entries()) as object;
+  } catch {
+    return undefined;
+  }
+})();
+const setIteratorPrototype = (() => {
+  try {
+    return getPrototypeOf(new Set().values()) as object;
+  } catch {
+    return undefined;
+  }
+})();
+const stringIteratorPrototype = (() => {
+  try {
+    return getPrototypeOf(""[Symbol.iterator]()) as object;
+  } catch {
+    return undefined;
+  }
+})();
+const generatorPrototype = (() => {
+  try {
+    return getPrototypeOf(getPrototypeOf((function* () {})())) as object;
+  } catch {
+    return undefined;
+  }
+})();
+const asyncGeneratorPrototype = (() => {
+  try {
+    return getPrototypeOf(getPrototypeOf((async function* () {})())) as object;
+  } catch {
+    return undefined;
+  }
+})();
+const webAssemblyMemoryBuffer = (() => {
+  try {
+    return getOwnPropertyDescriptor(WebAssembly.Memory.prototype, "buffer")?.get;
+  } catch {
+    return undefined;
+  }
+})();
 
 function callGetter<T>(getter: Getter | undefined, value: unknown): T | undefined {
   if (!getter) return;
@@ -170,6 +220,19 @@ function isIntrinsicInstance(value: unknown, constructor: Function | undefined):
   } catch {
     return false;
   }
+}
+
+function hasPrototypeAt(value: object, expected: object | undefined, depth: number): boolean {
+  if (!expected) return false;
+  try {
+    let prototype: object | null = value;
+    for (let index = 0; index < depth; index++) {
+      prototype = getPrototypeOf(prototype) as object | null;
+      if (!prototype) return false;
+    }
+    return prototype === expected;
+  } catch {}
+  return false;
 }
 
 function hasNativeConstructor(value: object, name: string): boolean {
@@ -232,12 +295,9 @@ function constructorName(value: object, fallback: string): string {
     const constructor = prototype
       ? getOwnPropertyDescriptor(prototype, "constructor")?.value
       : undefined;
-    if (
-      typeof constructor === "function" &&
-      typeof constructor.name === "string" &&
-      constructor.name
-    ) {
-      return constructor.name;
+    if (typeof constructor === "function") {
+      const name = getOwnPropertyDescriptor(constructor, "name")?.value;
+      if (typeof name === "string" && name) return name;
     }
   } catch {
     // Exotic objects can refuse prototype inspection.
@@ -375,6 +435,45 @@ function describeReference(
       description: `Set(${currentSetSize})`,
     };
   }
+  if (hasPrototypeAt(value, mapIteratorPrototype, 1)) {
+    return {
+      type: "object",
+      subtype: "iterator",
+      className: "MapIterator",
+      description: "MapIterator",
+    };
+  }
+  if (hasPrototypeAt(value, setIteratorPrototype, 1)) {
+    return {
+      type: "object",
+      subtype: "iterator",
+      className: "SetIterator",
+      description: "SetIterator",
+    };
+  }
+  if (hasPrototypeAt(value, stringIteratorPrototype, 1)) {
+    return {
+      type: "object",
+      className: "StringIterator",
+      description: "StringIterator",
+    };
+  }
+  if (hasPrototypeAt(value, generatorPrototype, 2)) {
+    return {
+      type: "object",
+      subtype: "generator",
+      className: "Generator",
+      description: "Generator",
+    };
+  }
+  if (hasPrototypeAt(value, asyncGeneratorPrototype, 2)) {
+    return {
+      type: "object",
+      subtype: "generator",
+      className: "AsyncGenerator",
+      description: "AsyncGenerator",
+    };
+  }
   if (callMethod<boolean>(weakMapHas, value, [brandProbe]) !== undefined) {
     return {
       type: "object",
@@ -453,6 +552,19 @@ function describeReference(
     };
   }
 
+  const memoryBuffer = callGetter<ArrayBuffer>(webAssemblyMemoryBuffer, value);
+  const memoryByteLength =
+    callGetter<number>(arrayBufferByteLength, memoryBuffer) ??
+    callGetter<number>(sharedArrayBufferByteLength, memoryBuffer);
+  if (memoryByteLength !== undefined) {
+    return {
+      type: "object",
+      subtype: "webassemblymemory",
+      className: "Memory",
+      description: `Memory(${memoryByteLength / 65_536})`,
+    };
+  }
+
   const byteLength = callGetter<number>(arrayBufferByteLength, value);
   if (byteLength !== undefined) {
     return {
@@ -474,6 +586,17 @@ function describeReference(
 
   const name = className(value, "Object");
   return { type: "object", className: name, description: name };
+}
+
+function entryDescription(value: unknown): string {
+  if (value === null) return "null";
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "bigint") return `${value}n`;
+  if (typeof value === "number") return Object.is(value, -0) ? "-0" : String(value);
+  if (typeof value === "boolean" || typeof value === "undefined") return String(value);
+  return (
+    describeReference(value as symbol | object | CallableFunction).description ?? String(value)
+  );
 }
 
 function isArrayIndex(name: PropertyKey): boolean {
@@ -524,7 +647,7 @@ function protocolValue(value: unknown, depth = 1_000): unknown {
       protocolValue(value[index], depth - 1),
     );
   }
-  const result: Record<string, unknown> = Object.create(null);
+  const result: Record<string, unknown> = createObject(null) as Record<string, unknown>;
   let names: string[];
   try {
     names = Object.keys(value);
@@ -549,6 +672,7 @@ export class RemoteObjectStore {
   private nextObjectId = 1;
   private readonly objects = new Map<string, StoredObject>();
   private readonly objectGroups = new Map<string, Set<string>>();
+  private readonly virtualObjects = new WeakMap<object, NonNullable<StoredObject["virtual"]>>();
 
   constructor(private readonly scope = createScope()) {}
 
@@ -581,6 +705,16 @@ export class RemoteObjectStore {
       return { type: reference.type, value: protocolValue(value) };
     }
 
+    const virtual =
+      (type === "object" || type === "function") && value !== null
+        ? this.virtualObjects.get(value as object)
+        : undefined;
+    if (virtual === "entries") {
+      return this.wrapEntries(value as CollectionEntry[], options.objectGroup);
+    }
+    if (virtual === "entry") {
+      return this.wrapEntry(value as CollectionEntry, options.objectGroup);
+    }
     const objectId = this.bind(value, options.objectGroup);
     return { ...describeReference(value as symbol | object | CallableFunction), objectId };
   }
@@ -628,10 +762,17 @@ export class RemoteObjectStore {
     return undefined;
   }
 
-  private bind(value: unknown, objectGroup?: string): string {
+  private bind(value: unknown, objectGroup?: string, virtual?: StoredObject["virtual"]): string {
     const objectId = `${this.scope}.${this.nextObjectId++}`;
-    const entry: StoredObject = objectGroup ? { value, objectGroup } : { value };
+    const entry: StoredObject = {
+      value,
+      ...(objectGroup ? { objectGroup } : {}),
+      ...(virtual ? { virtual } : {}),
+    };
     this.objects.set(objectId, entry);
+    if (virtual && value !== null && (typeof value === "object" || typeof value === "function")) {
+      this.virtualObjects.set(value as object, virtual);
+    }
     if (objectGroup) {
       let members = this.objectGroups.get(objectGroup);
       if (!members) {
@@ -641,6 +782,71 @@ export class RemoteObjectStore {
       members.add(objectId);
     }
     return objectId;
+  }
+
+  private wrapEntries(
+    entries: CollectionEntry[],
+    objectGroup?: string,
+  ): Protocol.Runtime.RemoteObject {
+    return {
+      type: "object",
+      subtype: "array",
+      className: "Array",
+      description: `Array(${entries.length})`,
+      objectId: this.bind(entries, objectGroup, "entries"),
+    };
+  }
+
+  private wrapEntry(entry: CollectionEntry, objectGroup?: string): Protocol.Runtime.RemoteObject {
+    const description =
+      "key" in entry
+        ? `{${entryDescription(entry.key)} => ${entryDescription(entry.value)}}`
+        : entryDescription(entry.value);
+    return {
+      type: "object",
+      subtype: "internal#entry",
+      className: "Object",
+      description,
+      objectId: this.bind(entry, objectGroup, "entry"),
+    } as unknown as Protocol.Runtime.RemoteObject;
+  }
+
+  private collectionEntries(value: object): CollectionEntry[] | undefined {
+    if (callGetter<number>(mapSize, value) !== undefined) {
+      const entries: CollectionEntry[] = [];
+      try {
+        Reflect.apply(mapForEach, value, [
+          (entryValue: unknown, key: unknown) => {
+            const entry = createObject(null) as CollectionEntry;
+            entry.key = key;
+            entry.value = entryValue;
+            this.virtualObjects.set(entry, "entry");
+            entries[entries.length] = entry;
+          },
+        ]);
+        setPrototypeOf(entries, null);
+        return entries;
+      } catch {
+        return;
+      }
+    }
+    if (callGetter<number>(setSize, value) !== undefined) {
+      const entries: CollectionEntry[] = [];
+      try {
+        Reflect.apply(setForEach, value, [
+          (entryValue: unknown) => {
+            const entry = createObject(null) as CollectionEntry;
+            entry.value = entryValue;
+            this.virtualObjects.set(entry, "entry");
+            entries[entries.length] = entry;
+          },
+        ]);
+        setPrototypeOf(entries, null);
+        return entries;
+      } catch {
+        return;
+      }
+    }
   }
 
   private find(objectId: string): StoredObject {
@@ -670,22 +876,22 @@ export class RemoteObjectStore {
     const target = value;
     const owners: object[] = [target];
     if (!params.ownProperties) {
-      let prototype = Object.getPrototypeOf(target) as object | null;
+      let prototype = getPrototypeOf(target) as object | null;
       while (prototype !== null) {
         owners.push(prototype);
-        prototype = Object.getPrototypeOf(prototype) as object | null;
+        prototype = getPrototypeOf(prototype) as object | null;
       }
     }
 
     const seen = new Set<PropertyKey>();
     const result: Protocol.Runtime.PropertyDescriptor[] = [];
     for (const owner of owners) {
-      for (const name of Reflect.ownKeys(owner)) {
+      for (const name of ownKeys(owner)) {
         if (seen.has(name)) continue;
         seen.add(name);
         if (params.nonIndexedPropertiesOnly && isArrayIndex(name)) continue;
 
-        const descriptor = Object.getOwnPropertyDescriptor(owner, name);
+        const descriptor = getOwnPropertyDescriptor(owner, name);
         if (!descriptor) continue;
         const accessor = "get" in descriptor || "set" in descriptor;
         if (params.accessorPropertiesOnly && !accessor) continue;
@@ -700,8 +906,8 @@ export class RemoteObjectStore {
           property.writable = descriptor.writable ?? false;
           property.value = this.wrap(descriptor.value, wrapOptions);
         } else {
-          if (descriptor.get) property.get = this.wrap(descriptor.get, wrapOptions);
-          if (descriptor.set) property.set = this.wrap(descriptor.set, wrapOptions);
+          property.get = this.wrap(descriptor.get, wrapOptions);
+          property.set = this.wrap(descriptor.set, wrapOptions);
         }
         if (typeof name === "symbol") {
           property.symbol = this.wrap(name, wrapOptions);
@@ -713,15 +919,21 @@ export class RemoteObjectStore {
     if (params.accessorPropertiesOnly) {
       return { result };
     }
+    if (source.virtual) return { result };
 
-    return {
-      result,
-      internalProperties: [
-        {
-          name: "[[Prototype]]",
-          value: this.wrap(Object.getPrototypeOf(target) as object | null, wrapOptions),
-        },
-      ],
-    };
+    const internalProperties: Protocol.Runtime.InternalPropertyDescriptor[] = [
+      {
+        name: "[[Prototype]]",
+        value: this.wrap(getPrototypeOf(target) as object | null, wrapOptions),
+      },
+    ];
+    const entries = this.collectionEntries(target);
+    if (entries) {
+      internalProperties.push({
+        name: "[[Entries]]",
+        value: this.wrapEntries(entries, source.objectGroup),
+      });
+    }
+    return { result, internalProperties };
   }
 }

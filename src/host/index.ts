@@ -22,6 +22,7 @@ import {
   type TargetSummary,
   type WelcomeMessage,
 } from "../protocol.ts";
+import { isUsableTargetId } from "../target-id.ts";
 
 /** Minimal structural view of an iframe, so tests can fake it. */
 export type FrameElementLike = {
@@ -357,7 +358,10 @@ export class IcdpHost {
   private readonly pairings = new Map<string, Pairing>();
   private readonly relayClients = new Map<string, RelayClientState>();
   private readonly sessions = new Map<string, SessionState>();
+  private readonly targetCloses = new Map<string, Promise<Pairing>>();
+  private readonly targetEventQueue: TargetEvent[] = [];
   private readonly targetListeners = new Set<(event: TargetEvent) => void>();
+  private emittingTargetEvents = false;
   private nextSession = 1;
   private uplink: RelayUplink | null = null;
   private readonly win: WindowLike;
@@ -375,6 +379,9 @@ export class IcdpHost {
 
   /** Register an iframe slot as a Target. The Pairing owns target identity. */
   pair(iframe: FrameElementLike, options: PairOptions): void {
+    if (!isUsableTargetId(options.targetId)) {
+      throw new Error("Target id is not usable in a debugger URL");
+    }
     if (this.pairings.has(options.targetId)) {
       throw new Error(`Target "${options.targetId}" is already paired`);
     }
@@ -417,6 +424,7 @@ export class IcdpHost {
     if (!pairing) return;
     this.endSessionsForTargetDestruction(targetId);
     this.pairings.delete(targetId);
+    this.targetCloses.delete(targetId);
     pairing.iframe.removeEventListener("load", pairing.onLoad);
     this.failPending(pairing, "Target destroyed");
     pairing.port?.close();
@@ -500,7 +508,7 @@ export class IcdpHost {
       this.relayClients.delete(clientId);
     }
     for (const clientId of current) {
-      const directTargetId = targetIds[clientId];
+      const directTargetId = Object.hasOwn(targetIds, clientId) ? targetIds[clientId] : undefined;
       const existing = this.relayClients.get(clientId);
       if (existing && existing.directTargetId === directTargetId) continue;
       if (existing) {
@@ -902,21 +910,34 @@ export class IcdpHost {
     }
     if (method === "Target.closeTarget") {
       if (typeof params.targetId !== "string") throw new Error("Invalid parameters");
-      await this.prepareTargetClose(params.targetId);
-      this.unpair(params.targetId);
+      const pairing = await this.prepareTargetClose(params.targetId);
+      if (this.pairings.get(params.targetId) === pairing) this.unpair(params.targetId);
       return { success: true };
     }
     throw new Error(`Unhandled browser method: ${method}`);
   }
 
-  private async prepareTargetClose(targetId: string): Promise<void> {
-    if (!this.pairings.has(targetId)) {
-      throw new Error("No target with given id found");
+  private prepareTargetClose(targetId: string): Promise<Pairing> {
+    const active = this.targetCloses.get(targetId);
+    if (active) return active;
+    const pairing = this.pairings.get(targetId);
+    if (!pairing) {
+      return Promise.reject(new Error("No target with given id found"));
     }
     if (!this.options.onCloseTarget) {
-      throw new Error("Target.closeTarget is not handled by this Host");
+      return Promise.reject(new Error("Target.closeTarget is not handled by this Host"));
     }
-    await this.options.onCloseTarget(targetId);
+    const pending = Promise.resolve()
+      .then(() => this.options.onCloseTarget!(targetId))
+      .then(() => pairing)
+      .catch((error: unknown) => {
+        if (this.targetCloses.get(targetId) === pending) {
+          this.targetCloses.delete(targetId);
+        }
+        throw error;
+      });
+    this.targetCloses.set(targetId, pending);
+    return pending;
   }
 
   /** Resolve once a paired Target completes its handshake; reject if it is
@@ -931,6 +952,7 @@ export class IcdpHost {
         if (
           event.kind === "targetInfoChanged" &&
           event.target.targetId === targetId &&
+          this.pairings.get(targetId) === pairing &&
           pairing.connected
         ) {
           clearTimeout(timer);
@@ -1463,7 +1485,26 @@ export class IcdpHost {
   }
 
   private emitTargetEvent(event: TargetEvent): void {
-    for (const listener of this.targetListeners) listener(event);
+    this.targetEventQueue.push(event);
+    if (this.emittingTargetEvents) return;
+    this.emittingTargetEvents = true;
+    let failure: { error: unknown } | undefined;
+    try {
+      while (this.targetEventQueue.length > 0) {
+        try {
+          this.dispatchTargetEvent(this.targetEventQueue.shift()!);
+        } catch (error) {
+          failure ??= { error };
+        }
+      }
+    } finally {
+      this.targetEventQueue.length = 0;
+      this.emittingTargetEvents = false;
+    }
+    if (failure) throw failure.error;
+  }
+
+  private dispatchTargetEvent(event: TargetEvent): void {
     for (const client of this.relayClients.values()) {
       for (const agent of this.targetAgents(client)) {
         if (event.kind === "targetInfoChanged") {
@@ -1510,6 +1551,15 @@ export class IcdpHost {
         }
       }
     }
+    let failure: { error: unknown } | undefined;
+    for (const listener of this.targetListeners) {
+      try {
+        listener(event);
+      } catch (error) {
+        failure ??= { error };
+      }
+    }
+    if (failure) throw failure.error;
   }
 
   private probe(pairing: Pairing): void {
@@ -1728,7 +1778,7 @@ class RelayUplink {
       (envelope.targetIds === undefined ||
         (isRecord(envelope.targetIds) &&
           Object.entries(envelope.targetIds).every(
-            ([clientId, targetId]) => clientIds.includes(clientId) && typeof targetId === "string",
+            ([clientId, targetId]) => clientIds.includes(clientId) && isUsableTargetId(targetId),
           )))
     ) {
       this.host.syncRelayClients(

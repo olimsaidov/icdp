@@ -231,6 +231,50 @@ test("reports Chromium subtypes and constructor names for built-in references", 
     className: "DataView",
     description: "DataView(4)",
   });
+  expect(store.wrap(new Map([[1, 2]]).entries())).toMatchObject({
+    type: "object",
+    subtype: "iterator",
+    className: "MapIterator",
+    description: "MapIterator",
+  });
+  expect(store.wrap(new Set([1]).values())).toMatchObject({
+    type: "object",
+    subtype: "iterator",
+    className: "SetIterator",
+    description: "SetIterator",
+  });
+  const arrayIterator = store.wrap([1].values());
+  expect(arrayIterator).toMatchObject({
+    type: "object",
+    className: "Array Iterator",
+    description: "Array Iterator",
+  });
+  expect(arrayIterator).not.toHaveProperty("subtype");
+  const stringIterator = store.wrap("x"[Symbol.iterator]());
+  expect(stringIterator).toMatchObject({
+    type: "object",
+    className: "StringIterator",
+    description: "StringIterator",
+  });
+  expect(stringIterator).not.toHaveProperty("subtype");
+  expect(store.wrap((function* () {})())).toMatchObject({
+    type: "object",
+    subtype: "generator",
+    className: "Generator",
+    description: "Generator",
+  });
+  expect(store.wrap((async function* () {})())).toMatchObject({
+    type: "object",
+    subtype: "generator",
+    className: "AsyncGenerator",
+    description: "AsyncGenerator",
+  });
+  expect(store.wrap(new WebAssembly.Memory({ initial: 1 }))).toMatchObject({
+    type: "object",
+    subtype: "webassemblymemory",
+    className: "Memory",
+    description: "Memory(1)",
+  });
 });
 
 test("recognizes branded values created in another JavaScript realm", () => {
@@ -384,6 +428,7 @@ test("returns complete data, accessor, symbol, and prototype descriptors without
       className: "Function",
       objectId: expect.any(String),
     },
+    set: { type: "undefined" },
   });
   expect(properties.get("computed")).not.toHaveProperty("value");
   expect(properties.get("computed")).not.toHaveProperty("writable");
@@ -411,6 +456,234 @@ test("returns complete data, accessor, symbol, and prototype descriptors without
     },
   ]);
   expect(getterCalls).toBe(0);
+});
+
+test("exposes Chromium-shaped Map and Set entries with inherited object-group lifetime", () => {
+  const store = new RemoteObjectStore();
+  const mapId = store.wrap(new Map([["a", 1]]), { objectGroup: "map" }).objectId!;
+
+  const map = store.getProperties({ objectId: mapId, ownProperties: true });
+  const entries = map.internalProperties?.find(
+    (property) => property.name === "[[Entries]]",
+  )?.value;
+  expect(entries).toMatchObject({
+    type: "object",
+    subtype: "array",
+    className: "Array",
+    description: "Array(1)",
+    objectId: expect.any(String),
+  });
+
+  const freshEntriesValue = store.resolve(entries!.objectId!) as CollectionEntryForTest[];
+  expect(store.wrap(freshEntriesValue[0], { objectGroup: "map" })).toMatchObject({
+    subtype: "internal#entry",
+    className: "Object",
+    description: '{"a" => 1}',
+  });
+
+  const entriesProperties = store.getProperties({
+    objectId: entries!.objectId!,
+    ownProperties: true,
+  });
+  expect(entriesProperties.internalProperties).toBeUndefined();
+  expect(entriesProperties.result).toEqual([
+    {
+      name: "0",
+      configurable: true,
+      enumerable: true,
+      isOwn: true,
+      writable: true,
+      value: {
+        type: "object",
+        subtype: "internal#entry",
+        className: "Object",
+        description: '{"a" => 1}',
+        objectId: expect.any(String),
+      },
+    },
+    {
+      name: "length",
+      configurable: false,
+      enumerable: false,
+      isOwn: true,
+      writable: true,
+      value: { type: "number", description: "1", value: 1 },
+    },
+  ]);
+
+  const entryId = entriesProperties.result[0]!.value!.objectId!;
+  expect(store.getProperties({ objectId: entryId, ownProperties: true })).toEqual({
+    result: [
+      {
+        name: "key",
+        configurable: true,
+        enumerable: true,
+        isOwn: true,
+        writable: true,
+        value: { type: "string", value: "a" },
+      },
+      {
+        name: "value",
+        configurable: true,
+        enumerable: true,
+        isOwn: true,
+        writable: true,
+        value: { type: "number", description: "1", value: 1 },
+      },
+    ],
+  });
+
+  const entriesValue = store.resolve(entries!.objectId!) as CollectionEntryForTest[];
+  expect(Array.isArray(entriesValue)).toBe(true);
+  expect(Object.getPrototypeOf(entriesValue)).toBeNull();
+  expect(Object.getPrototypeOf(entriesValue[0]!)).toBeNull();
+
+  const reboundEntries = store.wrap(entriesValue, { objectGroup: "map" });
+  expect(reboundEntries).toMatchObject({
+    subtype: "array",
+    className: "Array",
+    description: "Array(1)",
+  });
+  expect(
+    store.getProperties({ objectId: reboundEntries.objectId!, ownProperties: true }),
+  ).not.toHaveProperty("internalProperties");
+
+  const reboundEntry = store.wrap(entriesValue[0], { objectGroup: "map" });
+  expect(reboundEntry).toMatchObject({
+    subtype: "internal#entry",
+    className: "Object",
+    description: '{"a" => 1}',
+  });
+  expect(
+    store.getProperties({ objectId: reboundEntry.objectId!, ownProperties: true }),
+  ).not.toHaveProperty("internalProperties");
+
+  store.releaseObjectGroup("map");
+  for (const objectId of [
+    mapId,
+    entries!.objectId!,
+    entryId,
+    reboundEntries.objectId!,
+    reboundEntry.objectId!,
+  ]) {
+    expect(() => store.resolve(objectId)).toThrow("Could not find object with given id");
+  }
+
+  const setId = store.wrap(new Set(["x"])).objectId!;
+  const setEntries = store
+    .getProperties({ objectId: setId, ownProperties: true })
+    .internalProperties?.find((property) => property.name === "[[Entries]]")?.value;
+  const setEntry = store.getProperties({
+    objectId: setEntries!.objectId!,
+    ownProperties: true,
+  }).result[0]!.value!;
+  expect(setEntry).toMatchObject({
+    subtype: "internal#entry",
+    description: '"x"',
+  });
+  expect(store.getProperties({ objectId: setEntry.objectId!, ownProperties: true })).toEqual({
+    result: [
+      {
+        name: "value",
+        configurable: true,
+        enumerable: true,
+        isOwn: true,
+        writable: true,
+        value: { type: "string", value: "x" },
+      },
+    ],
+  });
+});
+
+type CollectionEntryForTest = { key?: unknown; value: unknown };
+
+test("describing collection entries does not invoke constructor name accessors", () => {
+  let getterCalls = 0;
+  const constructor = function EntryKey() {
+    return getterCalls;
+  };
+  Object.defineProperty(constructor, "name", {
+    configurable: true,
+    get() {
+      getterCalls += 1;
+      return "Observed";
+    },
+  });
+  const key = Object.create({ constructor });
+  const store = new RemoteObjectStore();
+  const mapId = store.wrap(new Map([[key, 1]])).objectId!;
+  const entries = store
+    .getProperties({ objectId: mapId, ownProperties: true })
+    .internalProperties?.find((property) => property.name === "[[Entries]]")?.value;
+
+  store.getProperties({ objectId: entries!.objectId!, ownProperties: true });
+
+  expect(getterCalls).toBe(0);
+});
+
+test("virtual collection properties reflect replacements, additions, and holes", () => {
+  const store = new RemoteObjectStore();
+  const mapId = store.wrap(new Map([["a", 1]])).objectId!;
+  const entries = store
+    .getProperties({ objectId: mapId, ownProperties: true })
+    .internalProperties?.find((property) => property.name === "[[Entries]]")?.value;
+  const value = store.resolve(entries!.objectId!) as Array<unknown> & { extra?: number };
+
+  value[0] = { replacement: true };
+  value.extra = 7;
+  const replaced = store.getProperties({ objectId: entries!.objectId!, ownProperties: true });
+  expect(replaced.internalProperties).toBeUndefined();
+  expect(replaced.result.find((property) => property.name === "0")?.value).toMatchObject({
+    type: "object",
+    className: "Object",
+  });
+  expect(replaced.result.find((property) => property.name === "0")?.value).not.toHaveProperty(
+    "subtype",
+    "internal#entry",
+  );
+  expect(replaced.result.find((property) => property.name === "extra")?.value).toEqual({
+    type: "number",
+    description: "7",
+    value: 7,
+  });
+
+  delete value[0];
+  delete value.extra;
+  value.length = 2;
+  const sparse = store.getProperties({ objectId: entries!.objectId!, ownProperties: true });
+  expect(sparse.internalProperties).toBeUndefined();
+  expect(sparse.result.map((property) => property.name)).toEqual(["length"]);
+  expect(sparse.result[0]).toMatchObject({
+    configurable: false,
+    enumerable: false,
+    writable: true,
+    value: { type: "number", value: 2 },
+  });
+});
+
+test("collection inspection uses captured object intrinsics", () => {
+  const store = new RemoteObjectStore();
+  const mapId = store.wrap(new Map([["a", 1]])).objectId!;
+  const create = Object.create;
+  const setPrototypeOf = Object.setPrototypeOf;
+  let createCalls = 0;
+  let setPrototypeCalls = 0;
+  Object.create = ((...args: Parameters<typeof Object.create>) => {
+    createCalls += 1;
+    return Reflect.apply(create, Object, args);
+  }) as typeof Object.create;
+  Object.setPrototypeOf = ((...args: Parameters<typeof Object.setPrototypeOf>) => {
+    setPrototypeCalls += 1;
+    return Reflect.apply(setPrototypeOf, Object, args);
+  }) as typeof Object.setPrototypeOf;
+  try {
+    store.getProperties({ objectId: mapId, ownProperties: true });
+  } finally {
+    Object.create = create;
+    Object.setPrototypeOf = setPrototypeOf;
+  }
+
+  expect({ createCalls, setPrototypeCalls }).toEqual({ createCalls: 0, setPrototypeCalls: 0 });
 });
 
 // Mirrors V8RuntimeAgentImpl::getProperties' object guard.
