@@ -110,6 +110,7 @@ async function inspectPackedPackage(): Promise<{
 describe("distributable clients", () => {
   let agent: AgentBrowser;
   let harness: NetworkNavigationHarness;
+  const mouseEvents: Array<Record<string, unknown>> = [];
 
   beforeAll(async () => {
     harness = await createNetworkNavigationHarness({
@@ -120,12 +121,17 @@ describe("distributable clients", () => {
     const wasm = await readFile(
       new URL(import.meta.resolve("@olimsaidov/agent-browser-wasm/agent_browser_wasm_bg.wasm")),
     );
-    agent = await createAgentBrowser({
+    const options = {
+      cursor: true,
       transport: {
-        send: (method, params, sessionId) => harness.browser.send(method, params, sessionId),
+        send: (method: string, params?: Record<string, unknown>, sessionId?: string) => {
+          if (method === "Input.dispatchMouseEvent") mouseEvents.push(params ?? {});
+          return harness.browser.send(method, params, sessionId);
+        },
       },
       wasmUrl: wasm,
-    });
+    };
+    agent = await createAgentBrowser(options);
   });
 
   afterAll(async () => {
@@ -150,6 +156,105 @@ describe("distributable clients", () => {
       stderr: "",
     });
     expect(result.stdout).toMatch(/button "Network action".*ref=e\d+/);
+  });
+
+  test("the current WASM client renders a cursor and performs human mouse movements", async () => {
+    // Capture the closed shadow root without weakening the production overlay.
+    await harness.evaluate(`(() => {
+      const attachShadow = Element.prototype.attachShadow;
+      Element.prototype.attachShadow = function(options) {
+        const root = attachShadow.call(this, options);
+        if (this.localName === "agent-browser-recording-cursor") {
+          globalThis.__wasmCursorRoot = root;
+          Element.prototype.attachShadow = attachShadow;
+        }
+        return root;
+      };
+    })()`);
+    mouseEvents.length = 0;
+    expect(
+      await agent.run(["mouse", "move", "240", "160", "--human", "--seed", "42"]),
+    ).toMatchObject({ ok: true, exitCode: 0 });
+    const moves = mouseEvents.filter((event) => event.type === "mouseMoved");
+    expect(moves.length).toBeGreaterThan(2);
+    expect(moves.at(-1)).toMatchObject({ x: 240, y: 160 });
+    expect(
+      moves
+        .slice(0, -1)
+        .some((event) => Math.abs(Number(event.y) - (Number(event.x) * 2) / 3) > 0.1),
+    ).toBe(true);
+    expect(
+      await harness.evaluate(`(() => {
+      const pointer = globalThis.__wasmCursorRoot.querySelector(".pointer");
+      return { display: getComputedStyle(pointer).display, transform: pointer.style.transform };
+    })()`),
+    ).toEqual({ display: "block", transform: "translate3d(240px, 160px, 0px)" });
+    expect(await agent.run(["click", "button", "--human"])).toMatchObject({ ok: true });
+    expect(mouseEvents.at(-1)).toMatchObject({ type: "mouseReleased", button: "left", buttons: 0 });
+    expect(
+      await harness.evaluate(`globalThis.__wasmCursorRoot.querySelectorAll(".ripple").length`),
+    ).toBeGreaterThan(0);
+    expect((await agent.run(["--version"])).stdout).toBe("agent-browser 0.38.1");
+  });
+
+  test("the WASM client drags with a held button and preserves mouse state across commands", async () => {
+    await harness.evaluate(`(() => {
+      for (const [id, left] of [["drag-source", 40], ["drag-target", 280]]) {
+        const element = document.createElement("div");
+        element.id = id;
+        element.style.cssText = "position:fixed;top:220px;left:" + left + "px;width:40px;height:40px";
+        document.body.appendChild(element);
+      }
+      globalThis.__wasmPointerEvents = [];
+      for (const type of ["pointermove", "pointerdown", "pointerup"]) {
+        document.addEventListener(type, event => globalThis.__wasmPointerEvents.push({
+          type, x: event.clientX, y: event.clientY, buttons: event.buttons,
+        }));
+      }
+    })()`);
+    mouseEvents.length = 0;
+    expect(await agent.run("drag #drag-source #drag-target --human")).toMatchObject({ ok: true });
+    const down = mouseEvents.findIndex((event) => event.type === "mousePressed");
+    const heldMoves = mouseEvents.slice(down + 1, -1);
+    expect(down).toBeGreaterThan(0);
+    expect(heldMoves.length).toBeGreaterThan(2);
+    expect(heldMoves.every((event) => event.type === "mouseMoved" && event.buttons === 1)).toBe(
+      true,
+    );
+    expect(mouseEvents.at(-1)).toMatchObject({ type: "mouseReleased", x: 300, y: 240, buttons: 0 });
+    expect(await harness.evaluate("globalThis.__wasmPointerEvents.at(-1)")).toEqual({
+      type: "pointerup",
+      x: 300,
+      y: 240,
+      buttons: 0,
+    });
+
+    expect(await agent.run("mouse down")).toMatchObject({ ok: true });
+    expect(mouseEvents.at(-1)).toMatchObject({ type: "mousePressed", x: 300, y: 240, buttons: 1 });
+    expect(await agent.run("mouse move 320 260 --steps 3")).toMatchObject({ ok: true });
+    expect(mouseEvents.slice(-3).every((event) => event.buttons === 1)).toBe(true);
+    expect(await agent.run("mouse up")).toMatchObject({ ok: true });
+    expect(mouseEvents.at(-1)).toMatchObject({ type: "mouseReleased", x: 320, y: 260, buttons: 0 });
+  });
+
+  test("the WASM client supports a human default with an explicit instant override", async () => {
+    const humanAgent = await createAgentBrowser({
+      inputMode: "human",
+      transport: {
+        send: (method, params, sessionId) => {
+          if (method === "Input.dispatchMouseEvent") mouseEvents.push(params ?? {});
+          return harness.browser.send(method, params, sessionId);
+        },
+      },
+    });
+    mouseEvents.length = 0;
+    expect(await humanAgent.run("mouse move 100 100")).toMatchObject({ ok: true });
+    expect(mouseEvents.length).toBeGreaterThan(2);
+    mouseEvents.length = 0;
+    expect(
+      await humanAgent.run(["mouse", "move", "120", "120", "--input-mode", "instant"]),
+    ).toMatchObject({ ok: true });
+    expect(mouseEvents).toEqual([{ type: "mouseMoved", x: 120, y: 120, buttons: 0 }]);
   });
 
   test("the packed package exposes every documented runtime entry point", async () => {

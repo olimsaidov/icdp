@@ -175,7 +175,11 @@ async function ensureAgent() {
   if (r.agent) return r.agent;
   setStatus("loading", "Loading agent…");
   const { createAgentBrowser } = r.mods.wasm;
-  r.agent = await createAgentBrowser({ transport: makeTransport() });
+  r.agent = await createAgentBrowser({
+    transport: makeTransport(),
+    cursor: true,
+    inputMode: "human",
+  });
   setStatus("ready", "Connected");
   return r.agent;
 }
